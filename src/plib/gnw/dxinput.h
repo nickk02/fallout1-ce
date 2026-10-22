@@ -11,6 +11,12 @@ typedef struct MouseData {
     unsigned char buttons[2];
     int wheelX;
     int wheelY;
+
+    // When set, `x` and `y` are only controller movement and `absX`/`absY` is
+    // the pointer position in game coordinates.
+    bool absolute;
+    int absX;
+    int absY;
 } MouseData;
 
 typedef struct KeyboardData {

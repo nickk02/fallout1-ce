@@ -1,6 +1,7 @@
 #include "plib/gnw/dxinput.h"
 
 #include "plib/gnw/controller.h"
+#include "plib/gnw/svga.h"
 
 namespace fallout {
 
@@ -69,6 +70,15 @@ bool dxinput_get_mouse_state(MouseData* mouseState)
     SDL_PumpEvents();
 
     Uint32 buttons = SDL_GetRelativeMouseState(&(mouseState->x), &(mouseState->y));
+
+    // Without pointer capture the game cursor must follow the real pointer.
+    mouseState->absolute = svga_get_pointer_position(&(mouseState->absX), &(mouseState->absY));
+    if (mouseState->absolute) {
+        buttons = SDL_GetMouseState(nullptr, nullptr);
+        mouseState->x = 0;
+        mouseState->y = 0;
+    }
+
     mouseState->buttons[0] = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
     mouseState->buttons[1] = (buttons & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
     mouseState->wheelX = gMouseWheelDeltaX;

@@ -103,6 +103,37 @@ void svga_update_mouse_mode()
     SDL_SetRelativeMouseMode(fullscreen ? SDL_TRUE : SDL_FALSE);
 }
 
+bool svga_get_pointer_position(int* x, int* y)
+{
+    if (gSdlWindow == NULL || gSdlRenderer == NULL || SDL_GetRelativeMouseMode()) {
+        return false;
+    }
+
+    int windowX;
+    int windowY;
+    SDL_GetMouseState(&windowX, &windowY);
+
+    float logicalX;
+    float logicalY;
+    SDL_RenderWindowToLogical(gSdlRenderer, (float)windowX, (float)windowY, &logicalX, &logicalY);
+
+    *x = (int)logicalX;
+    *y = (int)logicalY;
+    return true;
+}
+
+void svga_set_pointer_position(int x, int y)
+{
+    if (gSdlWindow == NULL || gSdlRenderer == NULL || SDL_GetRelativeMouseMode()) {
+        return;
+    }
+
+    int windowX;
+    int windowY;
+    SDL_RenderLogicalToWindow(gSdlRenderer, (float)x, (float)y, &windowX, &windowY);
+    SDL_WarpMouseInWindow(gSdlWindow, windowX, windowY);
+}
+
 bool svga_init(VideoOptions* video_options)
 {
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");

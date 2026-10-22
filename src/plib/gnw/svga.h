@@ -27,6 +27,11 @@ bool svga_init(VideoOptions* video_options);
 void svga_exit();
 void svga_toggle_fullscreen();
 void svga_update_mouse_mode();
+
+// Pointer position in game coordinates. Used when the pointer is not captured
+// (windowed mode). `svga_get_pointer_position` returns `false` when captured.
+bool svga_get_pointer_position(int* x, int* y);
+void svga_set_pointer_position(int x, int y);
 int screenGetWidth();
 int screenGetHeight();
 void handleWindowSizeChanged();

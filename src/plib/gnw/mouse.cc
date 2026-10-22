@@ -480,7 +480,7 @@ void mouse_info()
     int y;
     int buttons = 0;
 
-    MouseData mouseData;
+    MouseData mouseData = {};
     if (dxinput_get_mouse_state(&mouseData)) {
         x = mouseData.x;
         y = mouseData.y;
@@ -501,6 +501,19 @@ void mouse_info()
     x = (int)(x * mouse_sensitivity);
     y = (int)(y * mouse_sensitivity);
 
+    bool pointerNeedsWarp = false;
+    if (mouseData.absolute) {
+        // `x` and `y` hold controller movement only. Move the game cursor to
+        // the real pointer, then apply the controller on top.
+        int currentX;
+        int currentY;
+        mouse_get_position(&currentX, &currentY);
+
+        pointerNeedsWarp = x != 0 || y != 0;
+        x += mouseData.absX - currentX;
+        y += mouseData.absY - currentY;
+    }
+
     if (vcr_state == VCR_STATE_PLAYING) {
         if (((vcr_terminate_flags & VCR_TERMINATE_ON_MOUSE_PRESS) != 0 && buttons != 0)
             || ((vcr_terminate_flags & VCR_TERMINATE_ON_MOUSE_MOVE) != 0 && (x != 0 || y != 0))) {
@@ -514,6 +527,14 @@ void mouse_info()
     }
 
     mouse_simulate_input(x, y, buttons);
+
+    if (pointerNeedsWarp) {
+        // Keep the real pointer under the game cursor after controller input.
+        int newX;
+        int newY;
+        mouse_get_position(&newX, &newY);
+        svga_set_pointer_position(newX, newY);
+    }
 
     // TODO: Move to `_mouse_simulate_input`.
     // TODO: Record wheel event in VCR.
