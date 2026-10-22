@@ -17,6 +17,7 @@
 #include "game/object.h"
 #include "game/protinst.h"
 #include "game/proto.h"
+#include "game/soft_target.h"
 #include "game/skilldex.h"
 #include "game/tile.h"
 #include "platform_compat.h"
@@ -875,6 +876,13 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
     if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
         if (gmouse_3d_current_mode == GAME_MOUSE_MODE_MOVE) {
+            // Clicking an enemy attacks it instead of walking to it.
+            Object* enemy = object_under_mouse(OBJ_TYPE_CRITTER, false, map_elevation);
+            if (enemy != NULL && soft_target_is_hostile(enemy)) {
+                combat_attack_this(enemy);
+                return;
+            }
+
             int actionPoints;
             if (isInCombat()) {
                 actionPoints = combat_free_move + obj_dude->data.critter.combat.ap;

@@ -25,6 +25,13 @@ void controller_world_tick();
 // while the world is active and the stick is outside the dead zone.
 bool controller_get_move_vector(float* x, float* y);
 
+// While the map is active and an object is targeted, A interacts with it
+// instead of clicking at the cursor. Moving the right stick hands A back to the
+// cursor for a short time. The game sets availability every frame and takes the
+// pending press.
+void controller_set_interact_available(bool available);
+bool controller_take_interact();
+
 // Adds controller movement and button state on top of the mouse state.
 // Returns `true` if the controller changed anything.
 bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsigned char* rightButton);

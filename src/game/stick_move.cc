@@ -5,7 +5,9 @@
 #include "game/anim.h"
 #include "game/combat.h"
 #include "game/game.h"
+#include "game/gmouse.h"
 #include "game/object.h"
+#include "game/soft_target.h"
 #include "game/tile.h"
 #include "plib/gnw/controller.h"
 #include "plib/gnw/mouse.h"
@@ -23,6 +25,17 @@ static int stickRotation = -1;
 static int stickTarget = -1;
 static bool stickRunning = false;
 
+void camera_follow_update()
+{
+    // Edge scrolling would fight the lock, so it stays off while the map or
+    // combat loop runs. Screens that need it enable it again themselves.
+    gmouse_disable_scrolling();
+
+    if (tile_center_tile != obj_dude->tile) {
+        tile_set_center(obj_dude->tile, TILE_SET_CENTER_REFRESH_WINDOW);
+    }
+}
+
 static int stick_move_pick_rotation(float x, float y);
 static int stick_move_pick_target(int rotation);
 
@@ -30,10 +43,16 @@ void stick_move_update()
 {
     if (game_ui_is_disabled() || isInCombat() || mouse_hidden()) {
         stickMoving = false;
+        soft_target_clear();
         return;
     }
 
     controller_world_tick();
+
+    controller_set_interact_available(soft_target_update());
+    if (controller_take_interact()) {
+        soft_target_interact();
+    }
 
     float x;
     float y;

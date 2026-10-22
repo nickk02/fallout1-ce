@@ -28,12 +28,14 @@
 #include "game/scripts.h"
 #include "game/skill.h"
 #include "game/stat.h"
+#include "game/stick_move.h"
 #include "game/tile.h"
 #include "game/trait.h"
 #include "platform_compat.h"
 #include "plib/color/color.h"
 #include "plib/db/db.h"
 #include "plib/gnw/button.h"
+#include "plib/gnw/controller.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -2166,6 +2168,10 @@ static int combat_input()
         if (combat_end_due_to_load != 0) {
             break;
         }
+
+        // The right stick is the cursor here, as on the map.
+        controller_world_tick();
+        camera_follow_update();
 
         input = get_input();
 

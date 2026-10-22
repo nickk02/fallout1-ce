@@ -17,6 +17,7 @@ Rect scr_size;
 ScreenBlitFunc* scr_blit = GNW95_ShowRect;
 
 SDL_Window* gSdlWindow = NULL;
+static SDL_Cursor* gBlankCursor = NULL;
 SDL_Surface* gSdlSurface = NULL;
 SDL_Renderer* gSdlRenderer = NULL;
 SDL_Texture* gSdlTexture = NULL;
@@ -166,7 +167,14 @@ bool svga_init(VideoOptions* video_options)
     }
 
     // `winmain` hides the cursor before video init, and SDL resets that state
-    // in `SDL_VideoInit`. The game draws its own cursor.
+    // in `SDL_VideoInit`. The game draws its own cursor. Besides hiding it,
+    // set a transparent cursor so the system pointer stays invisible when the
+    // hidden state is lost (for example after focus or fullscreen changes).
+    static const Uint8 blankData[8 * 2] = { 0 };
+    gBlankCursor = SDL_CreateCursor(blankData, blankData, 16, 8, 0, 0);
+    if (gBlankCursor != NULL) {
+        SDL_SetCursor(gBlankCursor);
+    }
     SDL_ShowCursor(SDL_DISABLE);
 
     svga_update_mouse_mode();
@@ -215,6 +223,11 @@ void svga_exit()
     if (gSdlWindow != NULL) {
         SDL_DestroyWindow(gSdlWindow);
         gSdlWindow = NULL;
+    }
+
+    if (gBlankCursor != NULL) {
+        SDL_FreeCursor(gBlankCursor);
+        gBlankCursor = NULL;
     }
 
     SDL_QuitSubSystem(SDL_INIT_VIDEO);

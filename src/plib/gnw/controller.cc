@@ -15,6 +15,10 @@ static SDL_JoystickID controllerId = -1;
 static bool controllerSuppressed = false;
 static Uint32 lastWorldTicks = 0;
 static bool worldTicked = false;
+static bool interactAvailable = false;
+static bool interactPending = false;
+static bool aWasDown = false;
+static Uint32 cursorActiveUntil = 0;
 static Uint32 lastPollTicks = 0;
 static float remainderX = 0.0f;
 static float remainderY = 0.0f;
@@ -81,6 +85,18 @@ bool controller_get_move_vector(float* x, float* y)
     return *x != 0.0f || *y != 0.0f;
 }
 
+void controller_set_interact_available(bool available)
+{
+    interactAvailable = available;
+}
+
+bool controller_take_interact()
+{
+    bool pending = interactPending;
+    interactPending = false;
+    return pending;
+}
+
 bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsigned char* rightButton)
 {
     Uint32 now = SDL_GetTicks();
@@ -98,6 +114,9 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
     float stickY;
     if (controller_world_active()) {
         controller_read_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, &stickX, &stickY);
+        if (stickX != 0.0f || stickY != 0.0f) {
+            cursorActiveUntil = now + 1500;
+        }
     } else {
         controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &stickX, &stickY);
     }
@@ -117,6 +136,16 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
         elapsed = 0.1f;
     }
 
+    // A interacts with the targeted object unless the cursor was just used.
+    bool aClicks = a;
+    if (controller_world_active() && interactAvailable && now >= cursorActiveUntil) {
+        if (a && !aWasDown) {
+            interactPending = true;
+        }
+        aClicks = false;
+    }
+    aWasDown = a;
+
     remainderX += stickX * CONTROLLER_CURSOR_SPEED * elapsed;
     remainderY += stickY * CONTROLLER_CURSOR_SPEED * elapsed;
 
@@ -128,7 +157,7 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
     *x += dx;
     *y += dy;
 
-    if (a) {
+    if (aClicks) {
         *leftButton = 1;
     }
 
@@ -136,7 +165,7 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
         *rightButton = 1;
     }
 
-    return a || b || dx != 0 || dy != 0;
+    return aClicks || b || dx != 0 || dy != 0;
 }
 
 static void controller_open(int deviceIndex)
