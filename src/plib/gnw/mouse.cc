@@ -59,6 +59,7 @@ static int last_buttons = 0;
 
 // 0x671F18
 static bool mouse_is_hidden;
+static bool mouse_invisible = false;
 
 // 0x671F1C
 static int raw_x;
@@ -348,7 +349,7 @@ void mouse_show()
             for (i = 0; i < mouse_length; i++) {
                 for (v4 = 0; v4 < mouse_width; v4++) {
                     v6 = mouse_shape[i * mouse_full + v4];
-                    if (v6 != mouse_trans) {
+                    if (!mouse_invisible && v6 != mouse_trans) {
                         v2[v3] = v6;
                     }
                     v3++;
@@ -384,7 +385,9 @@ void mouse_show()
 
         mouse_buf = v2;
         if (mouse_blit_trans && mouse_is_hidden) {
-            mouse_blit_trans(mouse_shape, mouse_full, mouse_length, v7, v9, v8, v10, v7 + mouse_x, v9 + mouse_y, mouse_trans);
+            if (!mouse_invisible) {
+                mouse_blit_trans(mouse_shape, mouse_full, mouse_length, v7, v9, v8, v10, v7 + mouse_x, v9 + mouse_y, mouse_trans);
+            }
         } else {
             mouse_blit(mouse_buf, mouse_width, mouse_length, v7, v9, v8, v10, v7 + mouse_x, v9 + mouse_y);
         }
@@ -393,6 +396,26 @@ void mouse_show()
         mouse_is_hidden = false;
     }
     mouse_buf = v2;
+}
+
+bool mouse_is_invisible()
+{
+    return mouse_invisible;
+}
+
+void mouse_set_invisible(bool invisible)
+{
+    if (mouse_invisible == invisible) {
+        return;
+    }
+
+    mouse_invisible = invisible;
+
+    // Redraw the area under the cursor.
+    if (have_mouse && !mouse_is_hidden) {
+        mouse_hide();
+        mouse_show();
+    }
 }
 
 // 0x4B4D70

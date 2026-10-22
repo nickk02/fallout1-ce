@@ -1083,6 +1083,18 @@ static void refresh_all(Rect* rect, unsigned char* a2)
     }
 }
 
+Window* GNW_top_button_window()
+{
+    for (int index = num_windows - 1; index > 0; index--) {
+        Window* w = window[window_index[index]];
+        if ((w->flags & WINDOW_HIDDEN) == 0 && w->buttonListHead != NULL) {
+            return w;
+        }
+    }
+
+    return NULL;
+}
+
 // 0x4C3940
 Window* GNW_find(int win)
 {

@@ -140,6 +140,12 @@ void dxinput_keyboard_exit()
 {
 }
 
+void dxinput_add_wheel(int x, int y)
+{
+    gMouseWheelDeltaX += x;
+    gMouseWheelDeltaY += y;
+}
+
 void handleMouseEvent(SDL_Event* event)
 {
     // Mouse movement and buttons are accumulated in SDL itself and will be

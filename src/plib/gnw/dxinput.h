@@ -36,6 +36,9 @@ bool dxinput_read_keyboard_buffer(KeyboardData* keyboardData);
 
 void handleMouseEvent(SDL_Event* event);
 
+// Adds scrolling as if the mouse wheel moved.
+void dxinput_add_wheel(int x, int y);
+
 } // namespace fallout
 
 #endif /* FALLOUT_PLIB_GNW_DXINPUT_H_ */

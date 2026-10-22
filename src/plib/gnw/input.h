@@ -50,6 +50,23 @@ void GNW95_process_message();
 void GNW95_clear_time_stamps();
 void GNW95_lost_focus();
 
+// Presses and releases a key as if it came from the keyboard.
+void input_inject_key(int scancode);
+
+// Tells the input layer who is playing. The cursor is only drawn while the
+// mouse is the active device.
+void input_set_mouse_active(bool active);
+
+// Draws the cursor without giving navigation back to the mouse.
+void input_show_cursor();
+
+// `true` while a controller is connected and the mouse is not the active
+// device.
+bool input_controller_in_use();
+
+// `true` for the keys that move the character (WASD).
+bool input_is_move_key(int scancode);
+
 void beginTextInput();
 void endTextInput();
 

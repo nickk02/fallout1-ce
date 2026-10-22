@@ -2,30 +2,35 @@
 
 #include <math.h>
 
-namespace fallout {
+#include "plib/gnw/input.h"
+#include "plib/gnw/menu_focus.h"
 
-// Cursor speed at full stick deflection, in mouse units per second.
-#define CONTROLLER_CURSOR_SPEED 600.0f
+namespace fallout {
 
 // Radial dead zone, as a fraction of full deflection.
 #define CONTROLLER_DEAD_ZONE 0.2f
+
+// Cursor speed at full right stick deflection, in game pixels per second.
+#define CONTROLLER_CURSOR_SPEED 600.0f
+
+// Trigger deflection that counts as a press.
+#define CONTROLLER_TRIGGER_THRESHOLD 16000
 
 static SDL_GameController* controller = nullptr;
 static SDL_JoystickID controllerId = -1;
 static bool controllerSuppressed = false;
 static Uint32 lastWorldTicks = 0;
 static bool worldTicked = false;
-static bool interactAvailable = false;
-static bool interactPending = false;
-static bool aWasDown = false;
-static Uint32 cursorActiveUntil = 0;
-static Uint32 lastPollTicks = 0;
-static float remainderX = 0.0f;
-static float remainderY = 0.0f;
+static bool actionPending[CONTROLLER_ACTION_COUNT];
+static bool rightTriggerDown = false;
+static bool leftTriggerDown = false;
+static Uint32 lastCursorTicks = 0;
+static float cursorRemainderX = 0.0f;
+static float cursorRemainderY = 0.0f;
 
 static void controller_open(int deviceIndex);
 static void controller_close();
-static bool controller_world_active();
+static void controller_handle_button(SDL_GameControllerButton button);
 static void controller_read_stick(SDL_GameControllerAxis axisX, SDL_GameControllerAxis axisY, float* x, float* y);
 
 bool controller_init()
@@ -39,6 +44,11 @@ bool controller_init()
     // SDL queues `SDL_CONTROLLERDEVICEADDED` for devices that are already
     // connected, so there is no need to open anything here.
     return true;
+}
+
+bool controller_is_connected()
+{
+    return controller != nullptr;
 }
 
 void controller_exit()
@@ -61,6 +71,12 @@ void controller_handle_event(SDL_Event* event)
             controller_close();
         }
         break;
+    case SDL_CONTROLLERBUTTONDOWN:
+        if (controller != nullptr && event->cbutton.which == controllerId && !controllerSuppressed) {
+            input_set_mouse_active(false);
+            controller_handle_button((SDL_GameControllerButton)event->cbutton.button);
+        }
+        break;
     }
 }
 
@@ -73,99 +89,186 @@ void controller_world_tick()
 {
     lastWorldTicks = SDL_GetTicks();
     worldTicked = true;
+
+    if (controller == nullptr || controllerSuppressed) {
+        return;
+    }
+
+    bool rightTrigger = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > CONTROLLER_TRIGGER_THRESHOLD;
+    if (rightTrigger && !rightTriggerDown) {
+        actionPending[CONTROLLER_ACTION_ATTACK] = true;
+    }
+    rightTriggerDown = rightTrigger;
+
+    // The left trigger ends the turn in combat. Space does nothing elsewhere.
+    bool leftTrigger = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > CONTROLLER_TRIGGER_THRESHOLD;
+    if (leftTrigger && !leftTriggerDown) {
+        input_inject_key(SDL_SCANCODE_SPACE);
+    }
+    leftTriggerDown = leftTrigger;
+}
+
+bool controller_world_is_active()
+{
+    return worldTicked && SDL_GetTicks() - lastWorldTicks < 150;
 }
 
 bool controller_get_move_vector(float* x, float* y)
 {
-    if (controller == nullptr || controllerSuppressed || !controller_world_active()) {
+    if (controller == nullptr || controllerSuppressed || !controller_world_is_active()) {
         return false;
     }
 
     controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, x, y);
-    return *x != 0.0f || *y != 0.0f;
+    if (*x != 0.0f || *y != 0.0f) {
+        input_set_mouse_active(false);
+        return true;
+    }
+
+    return false;
 }
 
-void controller_set_interact_available(bool available)
+bool controller_handle_key(int scancode, bool pressed)
 {
-    interactAvailable = available;
+    ControllerAction action;
+    switch (scancode) {
+    case SDL_SCANCODE_E:
+        action = CONTROLLER_ACTION_INTERACT;
+        break;
+    case SDL_SCANCODE_F:
+        action = CONTROLLER_ACTION_ATTACK;
+        break;
+    case SDL_SCANCODE_Q:
+        action = CONTROLLER_ACTION_INSPECT;
+        break;
+    case SDL_SCANCODE_K:
+        if (pressed) {
+            input_inject_key(SDL_SCANCODE_S); // Skilldex
+        }
+        return true;
+    default:
+        return false;
+    }
+
+    if (pressed) {
+        actionPending[action] = true;
+    }
+    return true;
 }
 
-bool controller_take_interact()
+bool controller_take_action(ControllerAction action)
 {
-    bool pending = interactPending;
-    interactPending = false;
+    bool pending = actionPending[action];
+    actionPending[action] = false;
     return pending;
 }
 
 bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsigned char* rightButton)
 {
-    Uint32 now = SDL_GetTicks();
-    float elapsed = (now - lastPollTicks) / 1000.0f;
-    lastPollTicks = now;
-
-    if (controller == nullptr) {
+    // In the world loop there is no cursor.
+    if (controller == nullptr || controller_world_is_active()) {
+        if (menu_focus_is_active()) {
+            menu_focus_clear();
+        }
         return false;
     }
 
+    Uint32 now = SDL_GetTicks();
+
     bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
-    bool b = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B) != 0;
+
+    // The d-pad or the left stick moves the focus between buttons.
+    int dirX = 0;
+    int dirY = 0;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) dirX = -1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) dirX = 1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) dirY = -1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) dirY = 1;
 
     float stickX;
     float stickY;
-    if (controller_world_active()) {
-        controller_read_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, &stickX, &stickY);
-        if (stickX != 0.0f || stickY != 0.0f) {
-            cursorActiveUntil = now + 1500;
+    controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &stickX, &stickY);
+    if (dirX == 0 && dirY == 0 && (fabsf(stickX) > 0.5f || fabsf(stickY) > 0.5f)) {
+        if (fabsf(stickX) > fabsf(stickY)) {
+            dirX = stickX < 0.0f ? -1 : 1;
+        } else {
+            dirY = stickY < 0.0f ? -1 : 1;
         }
-    } else {
-        controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &stickX, &stickY);
     }
 
     if (controllerSuppressed) {
         // Wait for a neutral state so a button held across a focus change is
         // not reported as a fresh press.
-        if (a || b || stickX != 0.0f || stickY != 0.0f) {
+        if (a || dirX != 0 || dirY != 0) {
             return false;
         }
 
         controllerSuppressed = false;
     }
 
-    // The first poll after a long gap would otherwise fling the cursor.
+    if (dirX != 0 || dirY != 0) {
+        input_set_mouse_active(false);
+    }
+
+    static int lastDirX = 0;
+    static int lastDirY = 0;
+    static Uint32 nextNavTicks = 0;
+    if (dirX != 0 || dirY != 0) {
+        bool changed = dirX != lastDirX || dirY != lastDirY;
+        if (changed || now >= nextNavTicks) {
+            menu_focus_move(dirX, dirY);
+            nextNavTicks = now + (changed ? 350 : 130);
+        }
+    }
+    lastDirX = dirX;
+    lastDirY = dirY;
+
+    menu_focus_update();
+
+    // The first press of A only shows the focus. After that it clicks the
+    // focused button, because the cursor sits on it.
+    static bool aWasDown = false;
+    bool click = a;
+    if (a && !aWasDown && !menu_focus_is_active()) {
+        menu_focus_move(0, 0);
+        click = false;
+    }
+    aWasDown = a;
+
+    // The right stick is a free cursor, for screens that are not made of
+    // buttons, such as the world map.
+    float cursorX;
+    float cursorY;
+    controller_read_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, &cursorX, &cursorY);
+
+    float elapsed = (now - lastCursorTicks) / 1000.0f;
+    lastCursorTicks = now;
     if (elapsed > 0.1f) {
         elapsed = 0.1f;
     }
 
-    // A interacts with the targeted object unless the cursor was just used.
-    bool aClicks = a;
-    if (controller_world_active() && interactAvailable && now >= cursorActiveUntil) {
-        if (a && !aWasDown) {
-            interactPending = true;
-        }
-        aClicks = false;
+    bool moved = false;
+    if (cursorX != 0.0f || cursorY != 0.0f) {
+        input_show_cursor();
+
+        cursorRemainderX += cursorX * CONTROLLER_CURSOR_SPEED * elapsed;
+        cursorRemainderY += cursorY * CONTROLLER_CURSOR_SPEED * elapsed;
+
+        int dx = (int)cursorRemainderX;
+        int dy = (int)cursorRemainderY;
+        cursorRemainderX -= dx;
+        cursorRemainderY -= dy;
+
+        *x += dx;
+        *y += dy;
+        moved = dx != 0 || dy != 0;
     }
-    aWasDown = a;
 
-    remainderX += stickX * CONTROLLER_CURSOR_SPEED * elapsed;
-    remainderY += stickY * CONTROLLER_CURSOR_SPEED * elapsed;
-
-    int dx = (int)remainderX;
-    int dy = (int)remainderY;
-    remainderX -= dx;
-    remainderY -= dy;
-
-    *x += dx;
-    *y += dy;
-
-    if (aClicks) {
+    if (click) {
         *leftButton = 1;
     }
 
-    if (b) {
-        *rightButton = 1;
-    }
-
-    return aClicks || b || dx != 0 || dy != 0;
+    return click || moved;
 }
 
 static void controller_open(int deviceIndex)
@@ -178,8 +281,6 @@ static void controller_open(int deviceIndex)
 
     controllerId = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller));
     controllerSuppressed = true;
-    remainderX = 0.0f;
-    remainderY = 0.0f;
 }
 
 static void controller_close()
@@ -191,15 +292,54 @@ static void controller_close()
     }
 
     controllerSuppressed = false;
-    remainderX = 0.0f;
-    remainderY = 0.0f;
+    for (bool& pending : actionPending) {
+        pending = false;
+    }
 }
 
-// The world loop stops ticking while a menu, dialogue or inventory screen runs
-// its own loop, so a short gap means the world is not active.
-static bool controller_world_active()
+// Button presses become game actions or the keyboard shortcuts the game
+// already has, so the controller never duplicates game logic.
+static void controller_handle_button(SDL_GameControllerButton button)
 {
-    return worldTicked && SDL_GetTicks() - lastWorldTicks < 150;
+    if (controller_world_is_active()) {
+        switch (button) {
+        case SDL_CONTROLLER_BUTTON_A:
+            actionPending[CONTROLLER_ACTION_INTERACT] = true;
+            break;
+        case SDL_CONTROLLER_BUTTON_Y:
+            actionPending[CONTROLLER_ACTION_INSPECT] = true;
+            break;
+        case SDL_CONTROLLER_BUTTON_X:
+            input_inject_key(SDL_SCANCODE_I); // Inventory
+            break;
+        case SDL_CONTROLLER_BUTTON_B:
+            input_inject_key(SDL_SCANCODE_B); // Switch active hand
+            break;
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+            input_inject_key(SDL_SCANCODE_S); // Skilldex
+            break;
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+            input_inject_key(SDL_SCANCODE_P); // Pip-Boy
+            break;
+        case SDL_CONTROLLER_BUTTON_BACK:
+            input_inject_key(SDL_SCANCODE_C); // Character
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_UP:
+            input_inject_key(SDL_SCANCODE_TAB); // Automap
+            break;
+        case SDL_CONTROLLER_BUTTON_START:
+            input_inject_key(SDL_SCANCODE_ESCAPE); // Options
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    // Screens that run their own loop: B and Start go back.
+    if (button == SDL_CONTROLLER_BUTTON_B || button == SDL_CONTROLLER_BUTTON_START) {
+        input_inject_key(SDL_SCANCODE_ESCAPE);
+    }
 }
 
 static void controller_read_stick(SDL_GameControllerAxis axisXId, SDL_GameControllerAxis axisYId, float* x, float* y)

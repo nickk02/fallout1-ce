@@ -35,7 +35,6 @@
 #include "plib/color/color.h"
 #include "plib/db/db.h"
 #include "plib/gnw/button.h"
-#include "plib/gnw/controller.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -2169,8 +2168,7 @@ static int combat_input()
             break;
         }
 
-        // The right stick is the cursor here, as on the map.
-        controller_world_tick();
+        stick_move_update_combat();
         camera_follow_update();
 
         input = get_input();

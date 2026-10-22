@@ -3,12 +3,15 @@
 
 namespace fallout {
 
-// Moves the player in real time from the controller's left stick. Called once
-// per frame from the map loop.
+// Moves the player in real time from the left stick or WASD and runs the
+// controller's action buttons. Called once per frame from the map loop.
 void stick_move_update();
 
-// Keeps the player centered on screen. Manual scrolling stays in effect until
-// the player moves to another tile. Called once per frame from the map and
+// Same as `stick_move_update`, for the player's turn in combat. Movement is
+// limited by action points.
+void stick_move_update_combat();
+
+// Keeps the player centered on screen. Called once per frame from the map and
 // combat loops.
 void camera_follow_update();
 

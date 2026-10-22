@@ -487,6 +487,19 @@ void gmouse_bk_process()
         return;
     }
 
+    // The hex under the cursor is drawn on the map. With a controller there is
+    // no cursor, so the highlight would just sit on its last hex.
+    static bool hexHiddenByController = false;
+    if (mouse_is_invisible()) {
+        if (gmouse_3d_is_on()) {
+            gmouse_3d_off();
+            hexHiddenByController = true;
+        }
+    } else if (hexHiddenByController) {
+        gmouse_3d_on();
+        hexHiddenByController = false;
+    }
+
     int mouseX;
     int mouseY;
 
@@ -876,12 +889,19 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
     if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
         if (gmouse_3d_current_mode == GAME_MOUSE_MODE_MOVE) {
-            // Clicking an enemy attacks it instead of walking to it.
-            Object* enemy = object_under_mouse(OBJ_TYPE_CRITTER, false, map_elevation);
-            if (enemy != NULL && soft_target_is_hostile(enemy)) {
-                combat_attack_this(enemy);
+            // A click on an object only selects it. Its actions then come from
+            // the prompt above the interface bar or from the keys. A click on
+            // the ground still moves.
+            Object* clicked = object_under_mouse(-1, true, map_elevation);
+            if (clicked != NULL && clicked != obj_dude
+                && (FID_TYPE(clicked->fid) == OBJ_TYPE_CRITTER
+                    || FID_TYPE(clicked->fid) == OBJ_TYPE_ITEM
+                    || (FID_TYPE(clicked->fid) == OBJ_TYPE_SCENERY && proto_action_can_use(clicked->pid)))) {
+                soft_target_select(clicked);
                 return;
             }
+
+            soft_target_select(NULL);
 
             int actionPoints;
             if (isInCombat()) {

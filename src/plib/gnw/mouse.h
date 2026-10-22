@@ -39,6 +39,11 @@ int mouse_get_anim(unsigned char** frames, int* num_frames, int* width, int* len
 int mouse_set_anim_frames(unsigned char* frames, int num_frames, int start_frame, int width, int length, int hotx, int hoty, char trans, int speed);
 void mouse_show();
 void mouse_hide();
+
+// Keeps the cursor working but not drawn. Used while a controller or the
+// keyboard drives the game.
+void mouse_set_invisible(bool invisible);
+bool mouse_is_invisible();
 void mouse_info();
 void mouse_simulate_input(int delta_x, int delta_y, int buttons);
 bool mouse_in(int left, int top, int right, int bottom);

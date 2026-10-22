@@ -1,5 +1,7 @@
 #include "plib/gnw/svga.h"
 
+#include <math.h>
+
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/mouse.h"
@@ -123,11 +125,20 @@ bool svga_get_pointer_position(int* x, int* y)
     return true;
 }
 
+static Uint32 gLastWarpTicks = 0;
+
+bool svga_pointer_warp_recent()
+{
+    return SDL_GetTicks() - gLastWarpTicks < 60;
+}
+
 void svga_set_pointer_position(int x, int y)
 {
     if (gSdlWindow == NULL || gSdlRenderer == NULL || SDL_GetRelativeMouseMode()) {
         return;
     }
+
+    gLastWarpTicks = SDL_GetTicks();
 
     int windowX;
     int windowY;
@@ -149,12 +160,37 @@ bool svga_init(VideoOptions* video_options)
         windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
 
-    gSdlWindow = SDL_CreateWindow(GNW95_title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        video_options->width * video_options->scale,
-        video_options->height * video_options->scale,
+    // Fit the window to the screen: as large as fits with some margin, keeping
+    // the game's shape. The renderer scales the picture to the window.
+    int windowWidth = video_options->width * video_options->scale;
+    int windowHeight = video_options->height * video_options->scale;
+
+    SDL_Rect usable;
+    if (SDL_GetDisplayUsableBounds(0, &usable) == 0 && usable.w > 0 && usable.h > 0) {
+        float fit = fminf(0.92f * usable.w / windowWidth, 0.92f * usable.h / windowHeight);
+        windowWidth = (int)lroundf(windowWidth * fit);
+        windowHeight = (int)lroundf(windowHeight * fit);
+    }
+
+    gSdlWindow = SDL_CreateWindow(GNW95_title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        windowWidth,
+        windowHeight,
         windowFlags);
     if (gSdlWindow == NULL) {
         return false;
+    }
+
+    // Fullscreen may not cover the whole display (a notch or menu bar takes
+    // some), so take the width from the window we really got.
+    if (video_options->fitWidth) {
+        int actualWidth;
+        int actualHeight;
+        SDL_GetWindowSize(gSdlWindow, &actualWidth, &actualHeight);
+        if (actualWidth > 0 && actualHeight > 0) {
+            int width = video_options->height * actualWidth / actualHeight;
+            video_options->width = fminf(fmaxf((float)width, 960.0f), 1920.0f);
+            video_options->width &= ~1;
+        }
     }
 
     if (!createRenderer(video_options->width, video_options->height)) {
@@ -298,11 +334,43 @@ void handleWindowSizeChanged()
     createRenderer(screenGetWidth(), screenGetHeight());
 }
 
+static bool gFocusRectSet = false;
+static SDL_Rect gFocusRect;
+
+void svga_set_focus_rect(const Rect* rect)
+{
+    if (rect == NULL) {
+        gFocusRectSet = false;
+        return;
+    }
+
+    gFocusRect.x = rect->ulx;
+    gFocusRect.y = rect->uly;
+    gFocusRect.w = rect->lrx - rect->ulx + 1;
+    gFocusRect.h = rect->lry - rect->uly + 1;
+    gFocusRectSet = true;
+}
+
 void renderPresent()
 {
     SDL_UpdateTexture(gSdlTexture, NULL, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);
+
+    // The focus frame is drawn over the finished picture so the game never
+    // has to redraw anything to remove it.
+    if (gFocusRectSet) {
+        SDL_SetRenderDrawColor(gSdlRenderer, 60, 255, 60, 255);
+        SDL_RenderDrawRect(gSdlRenderer, &gFocusRect);
+
+        SDL_Rect inner = { gFocusRect.x + 1, gFocusRect.y + 1, gFocusRect.w - 2, gFocusRect.h - 2 };
+        SDL_RenderDrawRect(gSdlRenderer, &inner);
+
+        // `SDL_RenderClear` uses the draw color, so restore black or the next
+        // frame's borders turn green.
+        SDL_SetRenderDrawColor(gSdlRenderer, 0, 0, 0, 255);
+    }
+
     SDL_RenderPresent(gSdlRenderer);
 }
 

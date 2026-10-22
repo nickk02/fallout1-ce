@@ -492,6 +492,27 @@ void tile_refresh_display()
     }
 }
 
+// Pixel shift of the view away from the center tile, for smooth camera
+// movement.
+static int tile_pixel_dx = 0;
+static int tile_pixel_dy = 0;
+
+void tile_follow(int tile, int dx, int dy)
+{
+    if (tile == tile_center_tile && dx == tile_pixel_dx && dy == tile_pixel_dy) {
+        return;
+    }
+
+    tile_pixel_dx = dx;
+    tile_pixel_dy = dy;
+
+    if (tile != tile_center_tile) {
+        tile_set_center(tile, TILE_SET_CENTER_REFRESH_WINDOW);
+    } else {
+        tile_set_center(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+    }
+}
+
 // 0x49DEDC
 int tile_set_center(int tile, int flags)
 {
@@ -537,9 +558,9 @@ int tile_set_center(int tile, int flags)
     }
 
     tile_y = new_tile_y;
-    tile_offx = (buf_width - 32) / 2;
+    tile_offx = (buf_width - 32) / 2 - tile_pixel_dx;
     tile_x = new_tile_x;
-    tile_offy = (buf_length - 16) / 2;
+    tile_offy = (buf_length - 16) / 2 - tile_pixel_dy;
 
     if (tile_x & 1) {
         tile_x -= 1;

@@ -1,13 +1,25 @@
 #include "game/soft_target.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #include "game/actions.h"
 #include "game/combat.h"
 #include "game/critter.h"
+#include "game/intface.h"
 #include "game/map.h"
 #include "game/object.h"
 #include "game/protinst.h"
 #include "game/proto.h"
 #include "game/tile.h"
+#include "plib/color/color.h"
+#include "plib/gnw/button.h"
+#include "plib/gnw/controller.h"
+#include "plib/gnw/gnw.h"
+#include "plib/gnw/input.h"
+#include "plib/gnw/intrface.h"
+#include "plib/gnw/svga.h"
+#include "plib/gnw/text.h"
 
 namespace fallout {
 
@@ -15,21 +27,107 @@ namespace fallout {
 #define SOFT_TARGET_RANGE 5
 #define SOFT_TARGET_SCENERY_RANGE 3
 
+// Hexes within which the attack button finds a creature.
+#define SOFT_TARGET_ATTACK_RANGE 8
+
 static Object* softTarget = nullptr;
 static Object* softOutlined = nullptr;
 
+#define SOFT_TARGET_PROMPT_WIDTH 420
+#define SOFT_TARGET_PROMPT_HEIGHT 18
+
+static int promptWindow = -1;
+static bool promptVisible = false;
+static char promptShown[128] = "";
+
+typedef enum PromptActionKind {
+    PROMPT_ACTION_USE,
+    PROMPT_ACTION_ATTACK,
+    PROMPT_ACTION_INSPECT,
+} PromptActionKind;
+
+typedef struct PromptAction {
+    PromptActionKind kind;
+    char label[48];
+} PromptAction;
+
+#define SOFT_TARGET_MAX_ACTIONS 3
+
+static Object* selectedTarget = nullptr;
+static int promptButtons[SOFT_TARGET_MAX_ACTIONS] = { -1, -1, -1 };
+static PromptActionKind promptButtonKinds[SOFT_TARGET_MAX_ACTIONS];
+
+static Object* soft_target_pick(bool creaturesOnly, bool enemiesOnly, bool* outlinedObjectExists, bool* selectedExists);
+static void soft_target_show_prompt(const char* title, const PromptAction* actions, int actionCount);
+static void soft_target_hide_prompt();
+static int soft_target_describe(Object* target, bool inCombat, char* title, size_t titleSize, PromptAction* actions);
+static void soft_target_prompt_process();
+static void soft_target_prompt_clicked(int button, int keyCode);
 static int soft_target_score(Object* object, int range);
 static void soft_target_set_outline(Object* object);
 
-bool soft_target_update()
+bool soft_target_update(bool inCombat)
 {
-    static const int types[] = { OBJ_TYPE_CRITTER, OBJ_TYPE_ITEM, OBJ_TYPE_SCENERY };
+    bool outlinedObjectExists = false;
+    bool selectedExists = false;
+    Object* best = soft_target_pick(inCombat, inCombat, &outlinedObjectExists, &selectedExists);
+
+    // The outlined or selected object may be gone after a map change. Do not
+    // touch it then.
+    if (!outlinedObjectExists) {
+        softOutlined = nullptr;
+    }
+
+    if (!selectedExists) {
+        selectedTarget = nullptr;
+    }
+
+    // A selection from the mouse wins over the automatic pick, unless the
+    // controller is playing. In combat only enemies can be selected.
+    if (selectedTarget != nullptr && !input_controller_in_use()) {
+        bool allowed = !inCombat
+            || (FID_TYPE(selectedTarget->fid) == OBJ_TYPE_CRITTER && soft_target_is_hostile(selectedTarget));
+        if (allowed) {
+            best = selectedTarget;
+        }
+    }
+
+    softTarget = best;
+    soft_target_set_outline(best);
+
+    if (best != nullptr) {
+        char title[64];
+        PromptAction actions[SOFT_TARGET_MAX_ACTIONS];
+        int actionCount = soft_target_describe(best, inCombat, title, sizeof(title), actions);
+        soft_target_show_prompt(title, actions, actionCount);
+    } else {
+        soft_target_hide_prompt();
+    }
+
+    return best != nullptr;
+}
+
+void soft_target_select(Object* object)
+{
+    selectedTarget = object;
+}
+
+// Finds the best object in front of the player. With `creaturesOnly` it looks
+// for any living creature within attack range instead.
+static Object* soft_target_pick(bool creaturesOnly, bool enemiesOnly, bool* outlinedObjectExists, bool* selectedExists)
+{
+    static const int allTypes[] = { OBJ_TYPE_CRITTER, OBJ_TYPE_ITEM, OBJ_TYPE_SCENERY };
+    static const int creatureTypes[] = { OBJ_TYPE_CRITTER };
+
+    const int* types = creaturesOnly ? creatureTypes : allTypes;
+    int typeCount = creaturesOnly ? 1 : 3;
 
     Object* best = nullptr;
     int bestScore = 0;
-    bool outlinedObjectExists = false;
 
-    for (int type : types) {
+    for (int typeIndex = 0; typeIndex < typeCount; typeIndex++) {
+        int type = types[typeIndex];
+
         Object** objects;
         int count = obj_create_list(-1, obj_dude->elevation, type, &objects);
         if (count <= 0) {
@@ -38,8 +136,12 @@ bool soft_target_update()
 
         for (int index = 0; index < count; index++) {
             Object* object = objects[index];
-            if (object == softOutlined) {
-                outlinedObjectExists = true;
+            if (outlinedObjectExists != nullptr && object == softOutlined) {
+                *outlinedObjectExists = true;
+            }
+
+            if (selectedExists != nullptr && object == selectedTarget) {
+                *selectedExists = true;
             }
 
             if (object == obj_dude) {
@@ -50,7 +152,21 @@ bool soft_target_update()
                 continue;
             }
 
-            int range = type == OBJ_TYPE_SCENERY ? SOFT_TARGET_SCENERY_RANGE : SOFT_TARGET_RANGE;
+            if (creaturesOnly && critter_is_dead(object)) {
+                continue;
+            }
+
+            if (enemiesOnly && !soft_target_is_hostile(object)) {
+                continue;
+            }
+
+            int range = SOFT_TARGET_RANGE;
+            if (creaturesOnly) {
+                range = SOFT_TARGET_ATTACK_RANGE;
+            } else if (type == OBJ_TYPE_SCENERY) {
+                range = SOFT_TARGET_SCENERY_RANGE;
+            }
+
             int score = soft_target_score(object, range);
             if (score == -1) {
                 continue;
@@ -70,20 +186,56 @@ bool soft_target_update()
         obj_delete_list(objects);
     }
 
-    // The outlined object may be gone after a map change. Do not touch it then.
-    if (!outlinedObjectExists) {
-        softOutlined = nullptr;
+    return best;
+}
+
+bool soft_target_attack()
+{
+    Object* target = nullptr;
+    if (softTarget != nullptr && FID_TYPE(softTarget->fid) == OBJ_TYPE_CRITTER && !critter_is_dead(softTarget)) {
+        target = softTarget;
+    } else {
+        target = soft_target_pick(true, false, nullptr, nullptr);
     }
 
-    softTarget = best;
-    soft_target_set_outline(best);
-    return best != nullptr;
+    if (target == nullptr) {
+        return false;
+    }
+
+    combat_attack_this(target);
+    return true;
+}
+
+bool soft_target_inspect()
+{
+    Object* target = softTarget;
+    if (target == nullptr) {
+        return false;
+    }
+
+    if (obj_examine(obj_dude, target) == -1) {
+        obj_look_at(obj_dude, target);
+    }
+    return true;
 }
 
 bool soft_target_interact()
 {
     Object* target = softTarget;
     if (target == nullptr) {
+        return false;
+    }
+
+    // The prompt belongs to the map. Screens opened by an action must not
+    // show it.
+    soft_target_hide_prompt();
+
+    if (isInCombat()) {
+        // In combat the only action is attacking an enemy.
+        if (FID_TYPE(target->fid) == OBJ_TYPE_CRITTER && soft_target_is_hostile(target)) {
+            combat_attack_this(target);
+            return true;
+        }
         return false;
     }
 
@@ -112,6 +264,169 @@ void soft_target_clear()
 {
     softTarget = nullptr;
     soft_target_set_outline(nullptr);
+    soft_target_hide_prompt();
+}
+
+// Describes what the target offers. Returns the number of actions. The key
+// names follow the device in use.
+static int soft_target_describe(Object* target, bool inCombat, char* title, size_t titleSize, PromptAction* actions)
+{
+    bool pad = input_controller_in_use();
+    const char* use = pad ? "A" : "E";
+    const char* attack = pad ? "RT" : "F";
+    const char* inspect = pad ? "Y" : "Q";
+
+    snprintf(title, titleSize, "%s:", object_name(target));
+
+    int count = 0;
+    switch (FID_TYPE(target->fid)) {
+    case OBJ_TYPE_CRITTER:
+        if (critter_is_dead(target)) {
+            actions[count].kind = PROMPT_ACTION_USE;
+            snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Search", use);
+        } else if (soft_target_is_hostile(target)) {
+            actions[count].kind = PROMPT_ACTION_USE;
+            snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Attack", use);
+        } else {
+            actions[count].kind = PROMPT_ACTION_USE;
+            snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] %s", use, obj_action_can_talk_to(target) ? "Talk" : "Search");
+            actions[count].kind = PROMPT_ACTION_ATTACK;
+            snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Attack", attack);
+        }
+        break;
+    case OBJ_TYPE_ITEM:
+        actions[count].kind = PROMPT_ACTION_USE;
+        snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Pick up", use);
+        break;
+    default:
+        actions[count].kind = PROMPT_ACTION_USE;
+        snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Use", use);
+        break;
+    }
+
+    actions[count].kind = PROMPT_ACTION_INSPECT;
+    snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Inspect", inspect);
+
+    (void)inCombat;
+    return count;
+}
+
+// A one-line window above the interface bar: the target's name and its
+// actions. Each action is a button, so the mouse can click it. The window is
+// separate so the map never has to redraw it.
+static void soft_target_show_prompt(const char* title, const PromptAction* actions, int actionCount)
+{
+    char key[256];
+    int length = snprintf(key, sizeof(key), "%s", title);
+    for (int index = 0; index < actionCount; index++) {
+        length += snprintf(key + length, sizeof(key) - length, "|%s", actions[index].label);
+    }
+
+    if (promptVisible && strcmp(key, promptShown) == 0) {
+        return;
+    }
+
+    if (promptWindow == -1) {
+        int x = (screenGetWidth() - SOFT_TARGET_PROMPT_WIDTH) / 2;
+        int y = screenGetHeight() - INTERFACE_BAR_HEIGHT - SOFT_TARGET_PROMPT_HEIGHT - 6;
+        promptWindow = win_add(x, y, SOFT_TARGET_PROMPT_WIDTH, SOFT_TARGET_PROMPT_HEIGHT, colorTable[0], WINDOW_HIDDEN);
+        if (promptWindow == -1) {
+            return;
+        }
+
+        add_bk_process(soft_target_prompt_process);
+    }
+
+    strncpy(promptShown, key, sizeof(promptShown) - 1);
+    promptShown[sizeof(promptShown) - 1] = '\0';
+
+    for (int index = 0; index < SOFT_TARGET_MAX_ACTIONS; index++) {
+        if (promptButtons[index] != -1) {
+            win_delete_button(promptButtons[index]);
+            promptButtons[index] = -1;
+        }
+    }
+
+    int oldFont = text_curr();
+    text_font(101);
+
+    const int gap = 14;
+    int totalWidth = text_width(title);
+    for (int index = 0; index < actionCount; index++) {
+        totalWidth += gap + text_width(actions[index].label);
+    }
+
+    win_fill(promptWindow, 0, 0, SOFT_TARGET_PROMPT_WIDTH, SOFT_TARGET_PROMPT_HEIGHT, colorTable[0]);
+
+    int x = (SOFT_TARGET_PROMPT_WIDTH - totalWidth) / 2;
+    win_print(promptWindow, title, 0, x, 2, colorTable[992]);
+    x += text_width(title);
+
+    for (int index = 0; index < actionCount; index++) {
+        x += gap;
+
+        int width = text_width(actions[index].label);
+        win_print(promptWindow, actions[index].label, 0, x, 2, colorTable[32767]);
+
+        promptButtonKinds[index] = actions[index].kind;
+        promptButtons[index] = win_register_button(promptWindow, x, 0, width, SOFT_TARGET_PROMPT_HEIGHT, -1, -1, -1, -1, nullptr, nullptr, nullptr, BUTTON_FLAG_TRANSPARENT);
+        if (promptButtons[index] != -1) {
+            win_register_button_func(promptButtons[index], nullptr, nullptr, nullptr, soft_target_prompt_clicked);
+        }
+
+        x += width;
+    }
+
+    text_font(oldFont);
+
+    win_draw(promptWindow);
+    if (!promptVisible) {
+        win_show(promptWindow);
+        promptVisible = true;
+    }
+}
+
+static void soft_target_hide_prompt()
+{
+    if (promptVisible && promptWindow != -1) {
+        win_hide(promptWindow);
+    }
+
+    promptVisible = false;
+    promptShown[0] = '\0';
+}
+
+static void soft_target_prompt_clicked(int button, int keyCode)
+{
+    (void)keyCode;
+
+    for (int index = 0; index < SOFT_TARGET_MAX_ACTIONS; index++) {
+        if (promptButtons[index] != button) {
+            continue;
+        }
+
+        switch (promptButtonKinds[index]) {
+        case PROMPT_ACTION_USE:
+            soft_target_interact();
+            break;
+        case PROMPT_ACTION_ATTACK:
+            soft_target_attack();
+            break;
+        case PROMPT_ACTION_INSPECT:
+            soft_target_inspect();
+            break;
+        }
+        return;
+    }
+}
+
+// Runs in every loop, including menus, so the prompt never stays up over a
+// screen that opened on top of the map.
+static void soft_target_prompt_process()
+{
+    if (promptVisible && !controller_world_is_active()) {
+        soft_target_hide_prompt();
+    }
 }
 
 // Most critters can be talked to in the data, including rats, so the talk flag

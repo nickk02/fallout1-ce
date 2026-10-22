@@ -60,6 +60,9 @@ void win_refresh_all(Rect* rect);
 void win_drag(int win);
 void win_get_mouse_buf(unsigned char* a1);
 Window* GNW_find(int win);
+
+// Returns the topmost visible window that has buttons, or `NULL`.
+Window* GNW_top_button_window();
 unsigned char* win_get_buf(int win);
 int win_get_top_win(int x, int y);
 int win_width(int win);

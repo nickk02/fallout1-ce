@@ -2636,7 +2636,9 @@ static void object_move(int index)
             rect_min_bound(&dirty, &temp, &dirty);
 
             int v17 = 0;
-            if (isInCombat() && FID_TYPE(object->fid) == OBJ_TYPE_CRITTER) {
+            // Modern Edition: the player's movement is free, so only attacks and
+            // item use spend action points.
+            if (isInCombat() && FID_TYPE(object->fid) == OBJ_TYPE_CRITTER && object != obj_dude) {
                 int v18 = critter_compute_ap_from_distance(object, 1);
                 if (combat_free_move < v18) {
                     int ap = object->data.critter.combat.ap;
@@ -3050,7 +3052,7 @@ int dude_run(int action_points)
     return register_end();
 }
 
-int dude_move_to_tile(int tile, bool running)
+int dude_move_to_tile(int tile, bool running, int actionPoints)
 {
     if (running && !perk_level(PERK_SILENT_RUNNING)) {
         pc_flag_off(PC_FLAG_SNEAKING);
@@ -3058,9 +3060,9 @@ int dude_move_to_tile(int tile, bool running)
 
     register_begin(ANIMATION_REQUEST_RESERVED);
     if (running) {
-        register_object_run_to_tile(obj_dude, tile, obj_dude->elevation, -1, 0);
+        register_object_run_to_tile(obj_dude, tile, obj_dude->elevation, actionPoints, 0);
     } else {
-        register_object_move_to_tile(obj_dude, tile, obj_dude->elevation, -1, 0);
+        register_object_move_to_tile(obj_dude, tile, obj_dude->elevation, actionPoints, 0);
     }
     return register_end();
 }

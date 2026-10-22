@@ -10,6 +10,7 @@
 #include "plib/gnw/controller.h"
 #include "plib/gnw/dxinput.h"
 #include "plib/gnw/gnw.h"
+#include "plib/gnw/menu_focus.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
@@ -1094,10 +1095,15 @@ void GNW95_process_message()
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
         case SDL_MOUSEWHEEL:
+            // Motion caused by the game moving the pointer is not the user.
+            if (!(e.type == SDL_MOUSEMOTION && svga_pointer_warp_recent())) {
+                input_set_mouse_active(true);
+            }
             handleMouseEvent(&e);
             break;
         case SDL_CONTROLLERDEVICEADDED:
         case SDL_CONTROLLERDEVICEREMOVED:
+        case SDL_CONTROLLERBUTTONDOWN:
             controller_handle_event(&e);
             break;
         case SDL_FINGERDOWN:
@@ -1114,6 +1120,19 @@ void GNW95_process_message()
             // Alt+Enter toggles fullscreen.
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT) != 0) {
                 svga_toggle_fullscreen();
+                break;
+            }
+
+            // WASD moves the character while the map is active, so the game
+            // never sees those keys.
+            if (controller_world_is_active() && input_is_move_key(e.key.keysym.scancode)) {
+                input_set_mouse_active(false);
+                break;
+            }
+
+            // Keyboard counterparts of the controller's action buttons.
+            if (controller_world_is_active() && controller_handle_key(e.key.keysym.scancode, e.type == SDL_KEYDOWN && e.key.repeat == 0)) {
+                input_set_mouse_active(false);
                 break;
             }
 
@@ -1213,6 +1232,64 @@ static void GNW95_process_key(KeyboardData* data)
 
         kb_simulate_key(data);
     }
+}
+
+static bool mouseActive = true;
+
+void input_set_mouse_active(bool active)
+{
+    if (mouseActive == active) {
+        return;
+    }
+
+    mouseActive = active;
+    mouse_set_invisible(!active);
+
+    // The menu focus frame belongs to the controller.
+    if (active) {
+        menu_focus_clear();
+    }
+}
+
+bool input_controller_in_use()
+{
+    return !mouseActive && controller_is_connected();
+}
+
+void input_show_cursor()
+{
+    if (!mouseActive) {
+        mouseActive = true;
+        mouse_set_invisible(false);
+    }
+}
+
+bool input_is_move_key(int scancode)
+{
+    return scancode == SDL_SCANCODE_W
+        || scancode == SDL_SCANCODE_A
+        || scancode == SDL_SCANCODE_S
+        || scancode == SDL_SCANCODE_D
+        || scancode == SDL_SCANCODE_UP
+        || scancode == SDL_SCANCODE_DOWN
+        || scancode == SDL_SCANCODE_LEFT
+        || scancode == SDL_SCANCODE_RIGHT;
+}
+
+void input_inject_key(int scancode)
+{
+    if (kb_is_disabled()) {
+        return;
+    }
+
+    KeyboardData keyboardData;
+    keyboardData.key = scancode;
+    keyboardData.down = 1;
+    GNW95_process_key(&keyboardData);
+
+    keyboardData.key = scancode;
+    keyboardData.down = 0;
+    GNW95_process_key(&keyboardData);
 }
 
 // 0x4B4734

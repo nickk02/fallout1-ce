@@ -32,6 +32,13 @@ void svga_update_mouse_mode();
 // (windowed mode). `svga_get_pointer_position` returns `false` when captured.
 bool svga_get_pointer_position(int* x, int* y);
 void svga_set_pointer_position(int x, int y);
+
+// `true` shortly after the game moved the pointer itself, so the resulting
+// motion event is not the user's.
+bool svga_pointer_warp_recent();
+
+// Draws a frame around `rect` (game coordinates) until cleared with `NULL`.
+void svga_set_focus_rect(const Rect* rect);
 int screenGetWidth();
 int screenGetHeight();
 void handleWindowSizeChanged();

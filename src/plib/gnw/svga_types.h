@@ -19,6 +19,9 @@ typedef struct VideoOptions {
     int height;
     bool fullscreen;
     int scale;
+
+    // When set, `width` follows the shape of the window the display gives us.
+    bool fitWidth;
 } VideoOptions;
 
 } // namespace fallout

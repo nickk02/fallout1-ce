@@ -144,10 +144,21 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     win_set_minimized_title(windowTitle);
 
     VideoOptions video_options;
-    video_options.width = 640;
-    video_options.height = 480;
+    video_options.width = 1280;
+    video_options.height = 720;
     video_options.fullscreen = false;
+
+    // Match the display's shape so fullscreen has no black bars. The height
+    // stays at 720 and the width follows the aspect ratio.
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0) {
+        SDL_DisplayMode desktopMode;
+        if (SDL_GetDesktopDisplayMode(0, &desktopMode) == 0 && desktopMode.w > 0 && desktopMode.h > 0) {
+            int width = video_options.height * desktopMode.w / desktopMode.h;
+            video_options.width = std::min(std::max(width, 960), 1920) & ~1;
+        }
+    }
     video_options.scale = 1;
+    video_options.fitWidth = true;
 
     Config resolutionConfig;
     if (config_init(&resolutionConfig)) {
@@ -155,6 +166,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
             int screenWidth;
             if (config_get_value(&resolutionConfig, "MAIN", "SCR_WIDTH", &screenWidth)) {
                 video_options.width = std::max(screenWidth, 640);
+                video_options.fitWidth = false;
             }
 
             int screenHeight;
