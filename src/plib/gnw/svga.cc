@@ -165,6 +165,10 @@ bool svga_init(VideoOptions* video_options)
         return false;
     }
 
+    // `winmain` hides the cursor before video init, and SDL resets that state
+    // in `SDL_VideoInit`. The game draws its own cursor.
+    SDL_ShowCursor(SDL_DISABLE);
+
     svga_update_mouse_mode();
 
     gSdlSurface = SDL_CreateRGBSurface(0,
