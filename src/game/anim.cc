@@ -3050,6 +3050,21 @@ int dude_run(int action_points)
     return register_end();
 }
 
+int dude_move_to_tile(int tile, bool running)
+{
+    if (running && !perk_level(PERK_SILENT_RUNNING)) {
+        pc_flag_off(PC_FLAG_SNEAKING);
+    }
+
+    register_begin(ANIMATION_REQUEST_RESERVED);
+    if (running) {
+        register_object_run_to_tile(obj_dude, tile, obj_dude->elevation, -1, 0);
+    } else {
+        register_object_move_to_tile(obj_dude, tile, obj_dude->elevation, -1, 0);
+    }
+    return register_end();
+}
+
 // 0x417AB0
 void dude_fidget()
 {

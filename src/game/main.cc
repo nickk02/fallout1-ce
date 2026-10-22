@@ -34,6 +34,7 @@
 #include "game/scripts.h"
 #include "game/select.h"
 #include "game/selfrun.h"
+#include "game/stick_move.h"
 #include "game/wordwrap.h"
 #include "game/worldmap.h"
 #include "plib/color/color.h"
@@ -321,6 +322,8 @@ static void main_game_loop()
 
     while (game_user_wants_to_quit == 0) {
         sharedFpsLimiter.mark();
+
+        stick_move_update();
 
         int keyCode = get_input();
         game_handle_input(keyCode, false);

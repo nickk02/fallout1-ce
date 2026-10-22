@@ -13,13 +13,16 @@ namespace fallout {
 static SDL_GameController* controller = nullptr;
 static SDL_JoystickID controllerId = -1;
 static bool controllerSuppressed = false;
+static Uint32 lastWorldTicks = 0;
+static bool worldTicked = false;
 static Uint32 lastPollTicks = 0;
 static float remainderX = 0.0f;
 static float remainderY = 0.0f;
 
 static void controller_open(int deviceIndex);
 static void controller_close();
-static void controller_read_stick(float* x, float* y);
+static bool controller_world_active();
+static void controller_read_stick(SDL_GameControllerAxis axisX, SDL_GameControllerAxis axisY, float* x, float* y);
 
 bool controller_init()
 {
@@ -62,6 +65,22 @@ void controller_focus_lost()
     controllerSuppressed = true;
 }
 
+void controller_world_tick()
+{
+    lastWorldTicks = SDL_GetTicks();
+    worldTicked = true;
+}
+
+bool controller_get_move_vector(float* x, float* y)
+{
+    if (controller == nullptr || controllerSuppressed || !controller_world_active()) {
+        return false;
+    }
+
+    controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, x, y);
+    return *x != 0.0f || *y != 0.0f;
+}
+
 bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsigned char* rightButton)
 {
     Uint32 now = SDL_GetTicks();
@@ -77,7 +96,11 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
 
     float stickX;
     float stickY;
-    controller_read_stick(&stickX, &stickY);
+    if (controller_world_active()) {
+        controller_read_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, &stickX, &stickY);
+    } else {
+        controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &stickX, &stickY);
+    }
 
     if (controllerSuppressed) {
         // Wait for a neutral state so a button held across a focus change is
@@ -143,10 +166,17 @@ static void controller_close()
     remainderY = 0.0f;
 }
 
-static void controller_read_stick(float* x, float* y)
+// The world loop stops ticking while a menu, dialogue or inventory screen runs
+// its own loop, so a short gap means the world is not active.
+static bool controller_world_active()
 {
-    float axisX = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
-    float axisY = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+    return worldTicked && SDL_GetTicks() - lastWorldTicks < 150;
+}
+
+static void controller_read_stick(SDL_GameControllerAxis axisXId, SDL_GameControllerAxis axisYId, float* x, float* y)
+{
+    float axisX = SDL_GameControllerGetAxis(controller, axisXId) / 32767.0f;
+    float axisY = SDL_GameControllerGetAxis(controller, axisYId) / 32767.0f;
 
     float rawMagnitude = sqrtf(axisX * axisX + axisY * axisY);
     if (rawMagnitude < CONTROLLER_DEAD_ZONE) {
