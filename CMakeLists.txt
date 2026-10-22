@@ -225,6 +225,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/plib/db/lzss.h"
     "src/plib/gnw/button.cc"
     "src/plib/gnw/button.h"
+    "src/plib/gnw/controller.cc"
+    "src/plib/gnw/controller.h"
     "src/plib/gnw/debug.cc"
     "src/plib/gnw/debug.h"
     "src/plib/gnw/dxinput.cc"

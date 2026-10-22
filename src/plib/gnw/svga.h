@@ -25,6 +25,8 @@ void GNW95_ShowRect(unsigned char* src, unsigned int src_pitch, unsigned int a3,
 
 bool svga_init(VideoOptions* video_options);
 void svga_exit();
+void svga_toggle_fullscreen();
+void svga_update_mouse_mode();
 int screenGetWidth();
 int screenGetHeight();
 void handleWindowSizeChanged();

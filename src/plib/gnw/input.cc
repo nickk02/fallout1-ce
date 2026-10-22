@@ -7,6 +7,7 @@
 #include "platform_compat.h"
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
+#include "plib/gnw/controller.h"
 #include "plib/gnw/dxinput.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -1095,6 +1096,10 @@ void GNW95_process_message()
         case SDL_MOUSEWHEEL:
             handleMouseEvent(&e);
             break;
+        case SDL_CONTROLLERDEVICEADDED:
+        case SDL_CONTROLLERDEVICEREMOVED:
+            controller_handle_event(&e);
+            break;
         case SDL_FINGERDOWN:
             touch_handle_start(&(e.tfinger));
             break;
@@ -1106,6 +1111,12 @@ void GNW95_process_message()
             break;
         case SDL_KEYDOWN:
         case SDL_KEYUP:
+            // Alt+Enter toggles fullscreen.
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT) != 0) {
+                svga_toggle_fullscreen();
+                break;
+            }
+
             if (!kb_is_disabled()) {
                 keyboardData.key = e.key.keysym.scancode;
                 keyboardData.down = (e.key.state & SDL_PRESSED) != 0;
@@ -1123,11 +1134,13 @@ void GNW95_process_message()
                 break;
             case SDL_WINDOWEVENT_FOCUS_GAINED:
                 GNW95_isActive = true;
+                svga_update_mouse_mode();
                 win_refresh_all(&scr_size);
                 audioEngineResume();
                 break;
             case SDL_WINDOWEVENT_FOCUS_LOST:
                 GNW95_isActive = false;
+                controller_focus_lost();
                 audioEnginePause();
                 break;
             }

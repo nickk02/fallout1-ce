@@ -1,5 +1,7 @@
 #include "plib/gnw/dxinput.h"
 
+#include "plib/gnw/controller.h"
+
 namespace fallout {
 
 static bool dxinput_mouse_init();
@@ -25,6 +27,8 @@ bool dxinput_init()
         goto err;
     }
 
+    controller_init();
+
     return true;
 
 err:
@@ -37,6 +41,7 @@ err:
 // 0x4E0478
 void dxinput_exit()
 {
+    controller_exit();
     SDL_QuitSubSystem(SDL_INIT_EVENTS);
 }
 
@@ -72,6 +77,8 @@ bool dxinput_get_mouse_state(MouseData* mouseState)
     gMouseWheelDeltaX = 0;
     gMouseWheelDeltaY = 0;
 
+    controller_get_mouse_state(&(mouseState->x), &(mouseState->y), &(mouseState->buttons[0]), &(mouseState->buttons[1]));
+
     return true;
 }
 
@@ -103,7 +110,8 @@ bool dxinput_read_keyboard_buffer(KeyboardData* keyboardData)
 // 0x4E070C
 bool dxinput_mouse_init()
 {
-    return SDL_SetRelativeMouseMode(SDL_TRUE) == 0;
+    // Relative mode is managed by `svga_update_mouse_mode`.
+    return true;
 }
 
 // 0x4E078C

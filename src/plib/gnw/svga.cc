@@ -80,6 +80,29 @@ void GNW95_ShowRect(unsigned char* src, unsigned int srcPitch, unsigned int a3, 
     SDL_BlitSurface(gSdlSurface, &srcRect, gSdlTextureSurface, &destRect);
 }
 
+void svga_toggle_fullscreen()
+{
+    if (gSdlWindow == NULL) {
+        return;
+    }
+
+    bool fullscreen = (SDL_GetWindowFlags(gSdlWindow) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    SDL_SetWindowFullscreen(gSdlWindow, fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+    svga_update_mouse_mode();
+}
+
+// The pointer is captured only in fullscreen. In a window it stays free so it
+// can reach the title bar buttons and other applications.
+void svga_update_mouse_mode()
+{
+    if (gSdlWindow == NULL) {
+        return;
+    }
+
+    bool fullscreen = (SDL_GetWindowFlags(gSdlWindow) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    SDL_SetRelativeMouseMode(fullscreen ? SDL_TRUE : SDL_FALSE);
+}
+
 bool svga_init(VideoOptions* video_options)
 {
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
@@ -88,10 +111,10 @@ bool svga_init(VideoOptions* video_options)
         return false;
     }
 
-    Uint32 windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
+    Uint32 windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
 
     if (video_options->fullscreen) {
-        windowFlags |= SDL_WINDOW_FULLSCREEN;
+        windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
 
     gSdlWindow = SDL_CreateWindow(GNW95_title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
@@ -110,6 +133,8 @@ bool svga_init(VideoOptions* video_options)
 
         return false;
     }
+
+    svga_update_mouse_mode();
 
     gSdlSurface = SDL_CreateRGBSurface(0,
         video_options->width,

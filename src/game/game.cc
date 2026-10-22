@@ -146,7 +146,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     VideoOptions video_options;
     video_options.width = 640;
     video_options.height = 480;
-    video_options.fullscreen = true;
+    video_options.fullscreen = false;
     video_options.scale = 1;
 
     Config resolutionConfig;
