@@ -26,6 +26,11 @@ SDL_Renderer* gSdlRenderer = NULL;
 SDL_Texture* gSdlTexture = NULL;
 static SDL_Texture* gScaledTexture = NULL;
 static int gScaleFilter = 2;
+// The focus highlight: a rounded bar, a circle on a square button, drawn with
+// a see-through fill and a soft edge. It is built once per focus rectangle.
+#define FOCUS_MARGIN 6
+static SDL_Texture* gFocusTexture = NULL;
+static bool gFocusTextureStale = true;
 
 // Pixel-art enlargement done on the palette indexes before scaling to the
 // window: 1 (off), 2 or 3.
@@ -89,6 +94,19 @@ void GNW95_ShowRect(unsigned char* src, unsigned int srcPitch, unsigned int a3, 
     destRect.x = destX;
     destRect.y = destY;
     SDL_BlitSurface(gSdlSurface, &srcRect, gSdlTextureSurface, &destRect);
+}
+
+void svga_minimize()
+{
+    if (gSdlWindow == NULL) {
+        return;
+    }
+
+    if ((SDL_GetWindowFlags(gSdlWindow) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
+        SDL_SetWindowFullscreen(gSdlWindow, 0);
+    }
+
+    SDL_MinimizeWindow(gSdlWindow);
 }
 
 void svga_toggle_fullscreen()
@@ -352,6 +370,12 @@ static bool createRenderer(int width, int height)
 
 static void destroyRenderer()
 {
+    if (gFocusTexture != NULL) {
+        SDL_DestroyTexture(gFocusTexture);
+        gFocusTexture = NULL;
+        gFocusTextureStale = true;
+    }
+
     if (gSdlTextureSurface != NULL) {
         SDL_FreeSurface(gSdlTextureSurface);
         gSdlTextureSurface = NULL;
@@ -391,6 +415,7 @@ void handleWindowSizeChanged()
 static bool gFocusRectSet = false;
 static SDL_Rect gFocusRect;
 
+
 void svga_set_focus_rect(const Rect* rect)
 {
     if (rect == NULL) {
@@ -398,11 +423,84 @@ void svga_set_focus_rect(const Rect* rect)
         return;
     }
 
-    gFocusRect.x = rect->ulx;
-    gFocusRect.y = rect->uly;
-    gFocusRect.w = rect->lrx - rect->ulx + 1;
-    gFocusRect.h = rect->lry - rect->uly + 1;
+    SDL_Rect next = { rect->ulx, rect->uly, rect->lrx - rect->ulx + 1, rect->lry - rect->uly + 1 };
+    if (!gFocusRectSet || next.w != gFocusRect.w || next.h != gFocusRect.h) {
+        gFocusTextureStale = true;
+    }
+
+    gFocusRect = next;
     gFocusRectSet = true;
+}
+
+static void svga_build_focus_texture()
+{
+    if (gFocusTexture != NULL) {
+        SDL_DestroyTexture(gFocusTexture);
+        gFocusTexture = NULL;
+    }
+
+    int width = gFocusRect.w + FOCUS_MARGIN * 2;
+    int height = gFocusRect.h + FOCUS_MARGIN * 2;
+
+    gFocusTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
+    if (gFocusTexture == NULL) {
+        return;
+    }
+
+    SDL_SetTextureBlendMode(gFocusTexture, SDL_BLENDMODE_BLEND);
+
+    Uint32* pixels = (Uint32*)malloc(sizeof(Uint32) * width * height);
+    if (pixels == NULL) {
+        return;
+    }
+
+    // A circle over a roughly square button, a rounded rectangle over the rest.
+    int shortSide = gFocusRect.w < gFocusRect.h ? gFocusRect.w : gFocusRect.h;
+    int longSide = gFocusRect.w < gFocusRect.h ? gFocusRect.h : gFocusRect.w;
+    bool circle = longSide * 10 <= shortSide * 13;
+    float radius = circle ? shortSide / 2.0f : (shortSide / 4.0f < 3.0f ? 3.0f : (shortSide / 4.0f > 8.0f ? 8.0f : shortSide / 4.0f));
+
+    // The rounded shape is a rectangle shrunk by the radius, then grown again.
+    float left = FOCUS_MARGIN + radius;
+    float right = FOCUS_MARGIN + gFocusRect.w - radius;
+    float top = FOCUS_MARGIN + radius;
+    float bottom = FOCUS_MARGIN + gFocusRect.h - radius;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            float px = x + 0.5f;
+            float py = y + 0.5f;
+            float nearestX = px < left ? left : (px > right ? right : px);
+            float nearestY = py < top ? top : (py > bottom ? bottom : py);
+            float dx = px - nearestX;
+            float dy = py - nearestY;
+            float signedDistance = sqrtf(dx * dx + dy * dy) - radius;
+
+            float alpha = 0.0f;
+            if (signedDistance < 0.0f) {
+                alpha = 0.16f;
+            }
+
+            float edge = fabsf(signedDistance);
+            if (edge < 1.5f) {
+                float line = 0.7f * (1.0f - edge / 1.5f);
+                alpha = alpha > line ? alpha : line;
+            }
+
+            if (signedDistance > 0.0f && signedDistance < FOCUS_MARGIN) {
+                float glow = 0.22f * (1.0f - signedDistance / FOCUS_MARGIN);
+                glow *= glow * 4.5f;
+                alpha = alpha > glow ? alpha : glow;
+            }
+
+            Uint32 a = (Uint32)(alpha * 255.0f);
+            pixels[y * width + x] = (a << 24) | (140u << 16) | (255u << 8) | 170u;
+        }
+    }
+
+    SDL_UpdateTexture(gFocusTexture, NULL, pixels, width * (int)sizeof(Uint32));
+    free(pixels);
+    gFocusTextureStale = false;
 }
 
 // Enlarges the 8-bit picture two or three times without blending colors. Each
@@ -594,15 +692,14 @@ void renderPresent()
     // The focus frame is drawn over the finished picture so the game never
     // has to redraw anything to remove it.
     if (gFocusRectSet) {
-        SDL_SetRenderDrawColor(gSdlRenderer, 60, 255, 60, 255);
-        SDL_RenderDrawRect(gSdlRenderer, &gFocusRect);
+        if (gFocusTexture == NULL || gFocusTextureStale) {
+            svga_build_focus_texture();
+        }
 
-        SDL_Rect inner = { gFocusRect.x + 1, gFocusRect.y + 1, gFocusRect.w - 2, gFocusRect.h - 2 };
-        SDL_RenderDrawRect(gSdlRenderer, &inner);
-
-        // `SDL_RenderClear` uses the draw color, so restore black or the next
-        // frame's borders turn green.
-        SDL_SetRenderDrawColor(gSdlRenderer, 0, 0, 0, 255);
+        if (gFocusTexture != NULL) {
+            SDL_Rect destination = { gFocusRect.x - FOCUS_MARGIN, gFocusRect.y - FOCUS_MARGIN, gFocusRect.w + FOCUS_MARGIN * 2, gFocusRect.h + FOCUS_MARGIN * 2 };
+            SDL_RenderCopy(gSdlRenderer, gFocusTexture, NULL, &destination);
+        }
     }
 
     SDL_RenderPresent(gSdlRenderer);

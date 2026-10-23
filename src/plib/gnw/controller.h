@@ -48,6 +48,19 @@ bool controller_get_move_vector(float* x, float* y);
 // see it. `pressed` is `false` for releases and key repeats.
 bool controller_handle_key(int scancode, bool pressed);
 
+// While a list screen runs (the load and save slots), the d-pad and left stick
+// move the selection with the arrow keys and A confirms it, because the list is
+// one large area and not a set of buttons.
+void controller_set_list_mode(bool enabled);
+
+// While the inventory is open, X presses the key E, which the inventory reads
+// as "equip or use the highlighted item", and Y is the right mouse button.
+void controller_set_inventory_keys(bool enabled);
+
+// `true` while the A button is held down. Screens use it to tell a click made
+// with the controller from one made with the mouse.
+bool controller_a_is_down();
+
 // Returns `true` once per press of the button behind `action`.
 bool controller_take_action(ControllerAction action);
 

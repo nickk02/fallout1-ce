@@ -39,6 +39,7 @@
 #include "game/wordwrap.h"
 #include "game/worldmap.h"
 #include "platform_compat.h"
+#include "plib/gnw/controller.h"
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
 #include "plib/gnw/debug.h"
@@ -470,6 +471,7 @@ int SaveGame(int mode)
 
     int rc = -1;
     int doubleClickSlot = -1;
+    controller_set_list_mode(true);
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
@@ -569,7 +571,10 @@ int SaveGame(int mode)
                 rc = 1;
                 // Save game already exists, overwrite?
                 const char* title = getmsg(&lsgame_msgfl, &lsgmesg, 131);
-                if (dialog_out(title, NULL, 0, 169, 131, colorTable[32328], NULL, colorTable[32328], DIALOG_BOX_YES_NO) == 0) {
+                controller_set_list_mode(false);
+                int dialogResult = dialog_out(title, NULL, 0, 169, 131, colorTable[32328], NULL, colorTable[32328], DIALOG_BOX_YES_NO);
+                controller_set_list_mode(true);
+                if (dialogResult == 0) {
                     rc = -1;
                 }
             } else {
@@ -788,6 +793,7 @@ int SaveGame(int mode)
         sharedFpsLimiter.throttle();
     }
 
+    controller_set_list_mode(false);
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);
 
     LSGameEnd(LOAD_SAVE_WINDOW_TYPE_SAVE_GAME);
@@ -975,6 +981,7 @@ int LoadGame(int mode)
 
     int rc = -1;
     int doubleClickSlot = -1;
+    controller_set_list_mode(true);
     while (rc == -1) {
         sharedFpsLimiter.mark();
 
@@ -1232,6 +1239,8 @@ int LoadGame(int mode)
         renderPresent();
         sharedFpsLimiter.throttle();
     }
+
+    controller_set_list_mode(false);
 
     LSGameEnd(mode == LOAD_SAVE_MODE_FROM_MAIN_MENU
             ? LOAD_SAVE_WINDOW_TYPE_LOAD_GAME_FROM_MAIN_MENU

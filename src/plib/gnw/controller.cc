@@ -4,6 +4,7 @@
 
 #include "plib/gnw/input.h"
 #include "plib/gnw/menu_focus.h"
+#include "plib/gnw/text_pad.h"
 
 namespace fallout {
 
@@ -25,6 +26,11 @@ static bool actionPending[CONTROLLER_ACTION_COUNT];
 static bool rightTriggerDown = false;
 static bool leftTriggerDown = false;
 static Uint32 lastCursorTicks = 0;
+static bool textPadPolling = false;
+static bool listMode = false;
+static bool inventoryKeys = false;
+static bool rightStickFlicked = false;
+static bool listPolling = false;
 static float cursorRemainderX = 0.0f;
 static float cursorRemainderY = 0.0f;
 
@@ -32,6 +38,9 @@ static void controller_open(int deviceIndex);
 static void controller_close();
 static void controller_handle_button(SDL_GameControllerButton button);
 static void controller_read_stick(SDL_GameControllerAxis axisX, SDL_GameControllerAxis axisY, float* x, float* y);
+static void controller_text_pad_poll(Uint32 now);
+static bool controller_is_neutral();
+static void controller_list_poll(Uint32 now);
 
 bool controller_init()
 {
@@ -90,8 +99,21 @@ void controller_world_tick()
     lastWorldTicks = SDL_GetTicks();
     worldTicked = true;
 
-    if (controller == nullptr || controllerSuppressed) {
+    if (controller == nullptr) {
         return;
+    }
+
+    // After the window lost focus, wait for every button, trigger and stick to
+    // rest before the controller drives the character again. The menus do the
+    // same check, but they do not run while the world loop does.
+    if (controllerSuppressed) {
+        if (!controller_is_neutral()) {
+            return;
+        }
+
+        controllerSuppressed = false;
+        rightTriggerDown = false;
+        leftTriggerDown = false;
     }
 
     bool rightTrigger = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > CONTROLLER_TRIGGER_THRESHOLD;
@@ -99,6 +121,18 @@ void controller_world_tick()
         actionPending[CONTROLLER_ACTION_ATTACK] = true;
     }
     rightTriggerDown = rightTrigger;
+
+    // A flick of the right stick left or right picks the previous or next
+    // target.
+    float flickX;
+    float flickY;
+    controller_read_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, &flickX, &flickY);
+    if (!rightStickFlicked && fabsf(flickX) > 0.6f && fabsf(flickX) > fabsf(flickY)) {
+        rightStickFlicked = true;
+        actionPending[flickX > 0.0f ? CONTROLLER_ACTION_NEXT_TARGET : CONTROLLER_ACTION_PREVIOUS_TARGET] = true;
+    } else if (fabsf(flickX) < 0.3f) {
+        rightStickFlicked = false;
+    }
 
     // The left trigger pauses combat. The V key does nothing elsewhere.
     bool leftTrigger = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > CONTROLLER_TRIGGER_THRESHOLD;
@@ -162,6 +196,22 @@ bool controller_handle_key(int scancode, bool pressed)
     return true;
 }
 
+bool controller_a_is_down()
+{
+    return controller != nullptr && !controllerSuppressed && SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+}
+
+void controller_set_inventory_keys(bool enabled)
+{
+    inventoryKeys = enabled;
+}
+
+void controller_set_list_mode(bool enabled)
+{
+    listMode = enabled;
+    listPolling = false;
+}
+
 bool controller_take_action(ControllerAction action)
 {
     bool pending = actionPending[action];
@@ -180,6 +230,22 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
     }
 
     Uint32 now = SDL_GetTicks();
+
+    if (text_pad_is_active()) {
+        controller_text_pad_poll(now);
+        return false;
+    }
+    textPadPolling = false;
+
+    if (listMode) {
+        if (menu_focus_is_active()) {
+            menu_focus_clear();
+        }
+
+        controller_list_poll(now);
+        return false;
+    }
+    listPolling = false;
 
     bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
 
@@ -274,7 +340,18 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
         *leftButton = 1;
     }
 
-    return click || moved;
+    // In the inventory Y is the right mouse button, which switches between
+    // grabbing items and the item menu.
+    bool rightClick = false;
+    static bool yWasDown = false;
+    bool yDown = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y) != 0;
+    if (inventoryKeys && yDown && !yWasDown) {
+        *rightButton = 1;
+        rightClick = true;
+    }
+    yWasDown = yDown;
+
+    return click || moved || rightClick;
 }
 
 static void controller_open(int deviceIndex)
@@ -330,14 +407,20 @@ static void controller_handle_button(SDL_GameControllerButton button)
         case SDL_CONTROLLER_BUTTON_BACK:
             input_inject_key(SDL_SCANCODE_C); // Character
             break;
-        case SDL_CONTROLLER_BUTTON_DPAD_UP:
-            input_inject_key(SDL_SCANCODE_TAB); // Automap
-            break;
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-            actionPending[CONTROLLER_ACTION_PREVIOUS_TARGET] = true;
+            input_inject_key(SDL_SCANCODE_1); // Item 1
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-            actionPending[CONTROLLER_ACTION_NEXT_TARGET] = true;
+            input_inject_key(SDL_SCANCODE_2); // Item 2
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_UP:
+            input_inject_key(SDL_SCANCODE_R); // Reload
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+            input_inject_key(SDL_SCANCODE_M); // Next attack mode
+            break;
+        case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+            input_inject_key(SDL_SCANCODE_TAB); // Automap
             break;
         case SDL_CONTROLLER_BUTTON_START:
             input_inject_key(SDL_SCANCODE_ESCAPE); // Options
@@ -348,10 +431,66 @@ static void controller_handle_button(SDL_GameControllerButton button)
         return;
     }
 
+    // The character picker takes the face buttons while a text field is open.
+    if (text_pad_is_active()) {
+        switch (button) {
+        case SDL_CONTROLLER_BUTTON_B:
+            input_inject_key(SDL_SCANCODE_BACKSPACE);
+            break;
+        case SDL_CONTROLLER_BUTTON_X:
+            input_inject_key(SDL_SCANCODE_SPACE);
+            break;
+        case SDL_CONTROLLER_BUTTON_Y:
+            text_pad_toggle_case();
+            break;
+        case SDL_CONTROLLER_BUTTON_START:
+            input_inject_key(SDL_SCANCODE_RETURN);
+            break;
+        case SDL_CONTROLLER_BUTTON_BACK:
+            input_inject_key(SDL_SCANCODE_ESCAPE);
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    if (inventoryKeys) {
+        if (button == SDL_CONTROLLER_BUTTON_X) {
+            input_inject_key(SDL_SCANCODE_E);
+            return;
+        }
+
+    }
+
     // Screens that run their own loop: B and Start go back.
     if (button == SDL_CONTROLLER_BUTTON_B || button == SDL_CONTROLLER_BUTTON_START) {
         input_inject_key(SDL_SCANCODE_ESCAPE);
     }
+}
+
+static bool controller_is_neutral()
+{
+    for (int button = 0; button < SDL_CONTROLLER_BUTTON_MAX; button++) {
+        if (SDL_GameControllerGetButton(controller, (SDL_GameControllerButton)button)) {
+            return false;
+        }
+    }
+
+    if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > CONTROLLER_TRIGGER_THRESHOLD
+        || SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > CONTROLLER_TRIGGER_THRESHOLD) {
+        return false;
+    }
+
+    float x;
+    float y;
+    controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &x, &y);
+    if (x != 0.0f || y != 0.0f) {
+        return false;
+    }
+
+    controller_read_stick(SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY, &x, &y);
+    return x == 0.0f && y == 0.0f;
 }
 
 static void controller_read_stick(SDL_GameControllerAxis axisXId, SDL_GameControllerAxis axisYId, float* x, float* y)
@@ -373,6 +512,121 @@ static void controller_read_stick(SDL_GameControllerAxis axisXId, SDL_GameContro
     float scale = (magnitude - CONTROLLER_DEAD_ZONE) / (1.0f - CONTROLLER_DEAD_ZONE) / rawMagnitude;
     *x = axisX * scale;
     *y = axisY * scale;
+}
+
+// The d-pad or left stick moves over the character picker and A types.
+static void controller_text_pad_poll(Uint32 now)
+{
+    bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+
+    int dirX = 0;
+    int dirY = 0;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) dirX = -1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) dirX = 1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) dirY = -1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) dirY = 1;
+
+    float stickX;
+    float stickY;
+    controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &stickX, &stickY);
+    if (dirX == 0 && dirY == 0 && (fabsf(stickX) > 0.5f || fabsf(stickY) > 0.5f)) {
+        if (fabsf(stickX) > fabsf(stickY)) {
+            dirX = stickX < 0.0f ? -1 : 1;
+        } else {
+            dirY = stickY < 0.0f ? -1 : 1;
+        }
+    }
+
+    if (controllerSuppressed) {
+        if (a || dirX != 0 || dirY != 0) {
+            return;
+        }
+
+        controllerSuppressed = false;
+    }
+
+    static int lastDirX = 0;
+    static int lastDirY = 0;
+    static Uint32 nextMoveTicks = 0;
+    if (dirX != 0 || dirY != 0) {
+        input_note_controller();
+
+        bool changed = dirX != lastDirX || dirY != lastDirY;
+        if (changed || now >= nextMoveTicks) {
+            text_pad_move(dirX, dirY);
+            nextMoveTicks = now + (changed ? 300 : 120);
+        }
+    }
+    lastDirX = dirX;
+    lastDirY = dirY;
+
+    // A is still down from opening the text field: wait for the release.
+    static bool aWasDown = false;
+    if (!textPadPolling) {
+        textPadPolling = true;
+        aWasDown = a;
+    }
+
+    if (a && !aWasDown) {
+        input_note_controller();
+        text_pad_press();
+    }
+    aWasDown = a;
+}
+
+// The d-pad or left stick steps through a list and A confirms.
+static void controller_list_poll(Uint32 now)
+{
+    bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+
+    int dirY = 0;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) dirY = -1;
+    if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) dirY = 1;
+
+    float stickX;
+    float stickY;
+    controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, &stickX, &stickY);
+    if (dirY == 0 && fabsf(stickY) > 0.5f && fabsf(stickY) > fabsf(stickX)) {
+        dirY = stickY < 0.0f ? -1 : 1;
+    }
+
+    if (controllerSuppressed) {
+        if (a || dirY != 0) {
+            return;
+        }
+
+        controllerSuppressed = false;
+    }
+
+    static int lastDirY = 0;
+    static Uint32 nextMoveTicks = 0;
+    if (!listPolling) {
+        lastDirY = dirY;
+    }
+
+    if (dirY != 0) {
+        input_note_controller();
+
+        bool changed = dirY != lastDirY;
+        if (changed || now >= nextMoveTicks) {
+            input_inject_key(dirY < 0 ? SDL_SCANCODE_UP : SDL_SCANCODE_DOWN);
+            nextMoveTicks = now + (changed ? 300 : 110);
+        }
+    }
+    lastDirY = dirY;
+
+    // A is still down from opening the screen: wait for the release.
+    static bool aWasDown = false;
+    if (!listPolling) {
+        listPolling = true;
+        aWasDown = a;
+    }
+
+    if (a && !aWasDown) {
+        input_note_controller();
+        input_inject_key(SDL_SCANCODE_RETURN);
+    }
+    aWasDown = a;
 }
 
 } // namespace fallout

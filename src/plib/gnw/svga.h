@@ -26,6 +26,11 @@ void GNW95_ShowRect(unsigned char* src, unsigned int src_pitch, unsigned int a3,
 bool svga_init(VideoOptions* video_options);
 void svga_exit();
 void svga_toggle_fullscreen();
+
+// Minimizes the window. Full screen is left first, because a full screen window
+// cannot be minimized.
+void svga_minimize();
+
 void svga_update_mouse_mode();
 
 // Pointer position in game coordinates. Used when the pointer is not captured

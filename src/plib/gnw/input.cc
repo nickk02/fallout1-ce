@@ -15,6 +15,7 @@
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
+#include "plib/gnw/text_pad.h"
 #include "plib/gnw/text.h"
 #include "plib/gnw/touch.h"
 #include "plib/gnw/vcr.h"
@@ -1126,6 +1127,12 @@ void GNW95_process_message()
                 break;
             }
 
+            // Command+M minimizes, also from full screen.
+            if (e.type == SDL_KEYDOWN && e.key.repeat == 0 && e.key.keysym.scancode == SDL_SCANCODE_M && (e.key.keysym.mod & KMOD_GUI) != 0) {
+                svga_minimize();
+                break;
+            }
+
             // Alt+Enter toggles fullscreen.
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT) != 0) {
                 svga_toggle_fullscreen();
@@ -1349,11 +1356,13 @@ static void idleImpl()
 
 void beginTextInput()
 {
+    text_pad_begin();
     SDL_StartTextInput();
 }
 
 void endTextInput()
 {
+    text_pad_end();
     SDL_StopTextInput();
 }
 
