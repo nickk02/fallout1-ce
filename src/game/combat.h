@@ -58,6 +58,9 @@ int combat_player_knocked_out_by();
 int combat_explode_scenery(Object* a1, Object* a2);
 void combat_delete_critter(Object* obj);
 
+// `true` while fights run in real time instead of in turns.
+bool combat_is_realtime();
+
 static inline bool isInCombat()
 {
     return (combat_state & COMBAT_STATE_0x01) != 0;

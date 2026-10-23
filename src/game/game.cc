@@ -564,7 +564,7 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         break;
     case KEY_UPPERCASE_M:
     case KEY_LOWERCASE_M:
-        gmouse_3d_toggle_mode();
+        // The cursor modes are gone. Actions come from the target prompt.
         break;
     case KEY_UPPERCASE_B:
     case KEY_LOWERCASE_B:

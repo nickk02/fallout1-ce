@@ -3366,6 +3366,12 @@ unsigned int compute_tpf(Object* object, int fid)
         }
     }
 
+    // Real-time combat plays its animations faster, so a swing does not
+    // hold the fight for a second.
+    if (isInCombat() && combat_is_realtime()) {
+        fps *= 2;
+    }
+
     return 1000 / fps;
 }
 

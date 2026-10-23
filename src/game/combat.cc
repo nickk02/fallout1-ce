@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <unordered_map>
+
 #include "game/actions.h"
 #include "game/anim.h"
 #include "game/art.h"
@@ -92,6 +94,14 @@ static int combat_turn_running = 0;
 
 // 0x4FEC84
 unsigned int combat_state = COMBAT_STATE_0x02;
+
+// Real-time combat. See `combat_realtime_loop`.
+static bool combat_realtime = true;
+
+bool combat_is_realtime()
+{
+    return combat_realtime;
+}
 
 // 0x4FEC88
 STRUCT_664980* gcsd = NULL;
@@ -1767,7 +1777,9 @@ static void combat_begin(Object* a1)
         gmouse_set_cursor(MOUSE_CURSOR_WAIT_WATCH);
         combat_ending_guy = NULL;
         combat_begin_extra(a1);
-        intface_end_window_open(true);
+        // The end turn panel slides in and out in about half a second, which stalls
+        // real-time play.
+        intface_end_window_open(!combat_realtime);
         gmouse_enable_scrolling();
     }
 }
@@ -1822,7 +1834,9 @@ static void combat_over()
 
     tile_refresh_display();
 
-    intface_update_items(true);
+    // The item and armor class counters roll for a moment. That stalls real-time
+    // play, so they jump instead.
+    intface_update_items(!combat_realtime);
 
     obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
 
@@ -1846,7 +1860,7 @@ static void combat_over()
     combat_ai_over();
     game_ui_enable();
     gmouse_3d_set_mode(GAME_MOUSE_MODE_MOVE);
-    intface_update_ac(true);
+    intface_update_ac(!combat_realtime);
 
     if (critter_is_prone(obj_dude)) {
         if (!critter_is_dead(obj_dude)) {
@@ -2127,6 +2141,159 @@ void combat_end()
     combat_state |= COMBAT_STATE_0x08;
 }
 
+// Real-time combat. Instead of taking turns, every creature acts on its own
+// timer while the player moves and attacks at any moment. Action points refill
+// over time. Creatures still decide through the original AI, one at a time, and
+// the player's input keeps running while they act.
+#define REALTIME_AI_INTERVAL 1600
+#define REALTIME_AP_INTERVAL 450
+#define REALTIME_SEQUENCE_INTERVAL 5000
+
+static bool combat_realtime_active = false;
+static bool combat_realtime_pumping = false;
+static Object* combat_realtime_queued_attack = NULL;
+static unsigned int combat_realtime_ap_tick = 0;
+static std::unordered_map<Object*, unsigned int> combat_realtime_next_turn;
+
+static void combat_attack_this_now(Object* a1);
+static int combat_realtime_pump();
+static void combat_realtime_loop();
+
+// Runs the player's side of the fight: movement, actions, and action point
+// refill. It returns the key the player pressed, if any.
+static int combat_realtime_pump()
+{
+    if (combat_realtime_pumping) {
+        return -1;
+    }
+
+    combat_realtime_pumping = true;
+
+    unsigned int now = get_time();
+    if (now - combat_realtime_ap_tick >= REALTIME_AP_INTERVAL) {
+        combat_realtime_ap_tick = now;
+
+        int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+        if (obj_dude->data.critter.combat.ap < maxAp) {
+            obj_dude->data.critter.combat.ap += 1;
+            intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
+        }
+    }
+
+    stick_move_update_combat();
+
+    int input = get_input();
+    camera_follow_update();
+
+    // The attack queued while an animation was still running goes out as soon
+    // as the shared attack state is free again.
+    if (combat_realtime_queued_attack != NULL && combat_turn_running == 0) {
+        Object* target = combat_realtime_queued_attack;
+        combat_realtime_queued_attack = NULL;
+        combat_attack_this_now(target);
+    }
+
+    combat_realtime_pumping = false;
+    return input;
+}
+
+static void combat_realtime_loop()
+{
+    combat_realtime_active = true;
+    combat_realtime_next_turn.clear();
+    combat_realtime_queued_attack = NULL;
+
+    game_ui_enable();
+    gmouse_3d_refresh();
+    combat_state |= COMBAT_STATE_0x02;
+    intface_end_buttons_enable();
+    kb_clear();
+    combat_free_move = 0;
+
+    if (combat_highlight != 0) {
+        combat_outline_on();
+    }
+
+    obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+    intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
+    intface_update_ac(false);
+
+    unsigned int now = get_time();
+    combat_realtime_ap_tick = now;
+    unsigned int lastSequence = now;
+
+    // The attack that started the fight goes out right away.
+    if (gcsd != NULL) {
+        Object* defender = gcsd->defender;
+        gcsd = NULL;
+        combat_attack_this_now(defender);
+    }
+
+    while (!combat_should_end()) {
+        sharedFpsLimiter.mark();
+
+        if (game_user_wants_to_quit != 0 || combat_end_due_to_load != 0) {
+            break;
+        }
+
+        if ((obj_dude->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD)) != 0) {
+            break;
+        }
+
+        int input = combat_realtime_pump();
+        if (input == KEY_RETURN) {
+            combat_end();
+            break;
+        }
+
+        scripts_check_state_in_combat();
+        game_handle_input(input, true);
+
+        now = get_time();
+
+        // Creatures act one at a time, each on its own timer.
+        if (combat_turn_running == 0) {
+            if (now - lastSequence >= REALTIME_SEQUENCE_INTERVAL) {
+                lastSequence = now;
+                combat_sequence();
+            }
+
+            Object* next = NULL;
+            for (int index = 0; index < list_com; index++) {
+                Object* critter = combat_list[index];
+                if (critter == obj_dude || (critter->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+                    continue;
+                }
+
+                auto found = combat_realtime_next_turn.find(critter);
+                if (found == combat_realtime_next_turn.end() || now >= found->second) {
+                    next = critter;
+                    break;
+                }
+            }
+
+            if (next != NULL) {
+                combat_realtime_next_turn[next] = get_time() + REALTIME_AI_INTERVAL;
+                if (combat_turn(next, false) == -1) {
+                    break;
+                }
+
+                // `combat_turn` ends the interface for the player. Real-time
+                // combat keeps it on.
+                game_ui_enable();
+                intface_end_buttons_enable();
+                combat_state |= COMBAT_STATE_0x02;
+                gmouse_3d_refresh();
+            }
+        }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+
+    }
+    combat_realtime_active = false;
+}
+
 // 0x420698
 void combat_turn_run()
 {
@@ -2134,6 +2301,11 @@ void combat_turn_run()
         sharedFpsLimiter.mark();
 
         process_bk();
+
+        // The player keeps moving and attacking while a creature acts.
+        if (combat_realtime_active) {
+            combat_realtime_pump();
+        }
 
         renderPresent();
         sharedFpsLimiter.throttle();
@@ -2412,7 +2584,9 @@ void combat(STRUCT_664980* attack)
             gcsd = attack;
             v6 = 0;
         }
-
+        if (combat_realtime && v3 == 0) {
+            combat_realtime_loop();
+        } else
         do {
             if (v6 == -1) {
                 break;
@@ -2443,7 +2617,7 @@ void combat(STRUCT_664980* attack)
             gmouse_3d_set_mode(GAME_MOUSE_MODE_MOVE);
         } else {
             gmouse_disable_scrolling();
-            intface_end_window_close(true);
+            intface_end_window_close(!combat_realtime);
             gmouse_enable_scrolling();
             combat_over();
             scr_exec_map_update_scripts();
@@ -4477,6 +4651,18 @@ bool combat_to_hit(Object* target, int* accuracy)
 
 // 0x423D98
 void combat_attack_this(Object* a1)
+{
+    // Only one attack can be in flight, because they share one state. A new one
+    // waits for the current one to finish.
+    if (combat_realtime_active && combat_turn_running != 0) {
+        combat_realtime_queued_attack = a1;
+        return;
+    }
+
+    combat_attack_this_now(a1);
+}
+
+static void combat_attack_this_now(Object* a1)
 {
     if (a1 == NULL) {
         return;
