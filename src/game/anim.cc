@@ -2770,6 +2770,38 @@ static int anim_animate(Object* obj, int anim, int animationSequenceIndex, int f
     return 0;
 }
 
+// Real-time combat plays the part of a swing after the blow lands at triple
+// speed, so a creature is free to act again soon after it hits.
+static unsigned int anim_effective_tpf(Object* object, AnimationSad* sad_entry)
+{
+    unsigned int tpf = sad_entry->ticksPerFrame;
+
+    if (!isInCombat() || !combat_is_realtime() || object->fid != sad_entry->fid) {
+        return tpf;
+    }
+
+    int anim = FID_ANIM_TYPE(object->fid);
+    bool attack = (anim >= ANIM_THROW_PUNCH && anim <= ANIM_THROW_ANIM)
+        || (anim >= ANIM_THRUST_ANIM && anim <= ANIM_SWING_ANIM)
+        || (anim >= ANIM_FIRE_SINGLE && anim <= ANIM_FIRE_CONTINUOUS);
+    if (!attack) {
+        return tpf;
+    }
+
+    CacheEntry* handle;
+    Art* art = art_ptr_lock(object->fid, &handle);
+    if (art == NULL) {
+        return tpf;
+    }
+
+    if (object->frame > art_frame_action_frame(art)) {
+        tpf /= 3;
+    }
+
+    art_ptr_unlock(handle);
+    return tpf;
+}
+
 // 0x417498
 void object_animate()
 {
@@ -2788,7 +2820,7 @@ void object_animate()
         Object* object = sad_entry->obj;
 
         unsigned int time = get_time();
-        if (elapsed_tocks(time, sad_entry->animationTimestamp) < sad_entry->ticksPerFrame) {
+        if (elapsed_tocks(time, sad_entry->animationTimestamp) < anim_effective_tpf(object, sad_entry)) {
             continue;
         }
 
