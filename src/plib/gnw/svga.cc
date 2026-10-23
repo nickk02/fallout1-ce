@@ -23,6 +23,9 @@ static SDL_Cursor* gBlankCursor = NULL;
 SDL_Surface* gSdlSurface = NULL;
 SDL_Renderer* gSdlRenderer = NULL;
 SDL_Texture* gSdlTexture = NULL;
+static SDL_Texture* gScaledTexture = NULL;
+static int gScaleFilter = 2;
+static int gScaleFactor = 1;
 SDL_Surface* gSdlTextureSurface = NULL;
 
 // TODO: Remove once migration to update-render cycle is completed.
@@ -180,6 +183,8 @@ bool svga_init(VideoOptions* video_options)
         return false;
     }
 
+    gScaleFilter = video_options->scaleFilter;
+
     // Fullscreen may not cover the whole display (a notch or menu bar takes
     // some), so take the width from the window we really got.
     if (video_options->fitWidth) {
@@ -292,9 +297,35 @@ static bool createRenderer(int width, int height)
         return false;
     }
 
+    // Smooth scaling filters the picture. The others keep hard pixel edges.
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, gScaleFilter == 1 ? "linear" : "nearest");
     gSdlTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING, width, height);
     if (gSdlTexture == NULL) {
         return false;
+    }
+
+    // Sharp scaling first enlarges the picture by a whole number with hard
+    // edges, then lets the window scale that smoothly. Pixels stay crisp and
+    // the edges between them do not shimmer.
+    if (gScaleFilter == 2) {
+        int outputWidth;
+        int outputHeight;
+        if (SDL_GetRendererOutputSize(gSdlRenderer, &outputWidth, &outputHeight) == 0 && outputWidth > 0 && outputHeight > 0) {
+            int factorX = (outputWidth + width - 1) / width;
+            int factorY = (outputHeight + height - 1) / height;
+            gScaleFactor = factorX > factorY ? factorX : factorY;
+        } else {
+            gScaleFactor = 2;
+        }
+
+        if (gScaleFactor < 1) {
+            gScaleFactor = 1;
+        } else if (gScaleFactor > 8) {
+            gScaleFactor = 8;
+        }
+
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+        gScaledTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_TARGET, width * gScaleFactor, height * gScaleFactor);
     }
 
     Uint32 format;
@@ -317,6 +348,11 @@ static void destroyRenderer()
         gSdlTextureSurface = NULL;
     }
 
+    if (gScaledTexture != NULL) {
+        SDL_DestroyTexture(gScaledTexture);
+        gScaledTexture = NULL;
+    }
+
     if (gSdlTexture != NULL) {
         SDL_DestroyTexture(gSdlTexture);
         gSdlTexture = NULL;
@@ -326,6 +362,15 @@ static void destroyRenderer()
         SDL_DestroyRenderer(gSdlRenderer);
         gSdlRenderer = NULL;
     }
+}
+
+void svga_cycle_scale_filter()
+{
+    gScaleFilter = (gScaleFilter + 1) % 3;
+    handleWindowSizeChanged();
+
+    // The new picture buffer starts empty.
+    win_refresh_all(&scr_size);
 }
 
 void handleWindowSizeChanged()
@@ -354,8 +399,19 @@ void svga_set_focus_rect(const Rect* rect)
 void renderPresent()
 {
     SDL_UpdateTexture(gSdlTexture, NULL, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
-    SDL_RenderClear(gSdlRenderer);
-    SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);
+
+    if (gScaledTexture != NULL) {
+        // First pass: enlarge by a whole number with hard edges.
+        SDL_SetRenderTarget(gSdlRenderer, gScaledTexture);
+        SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);
+        SDL_SetRenderTarget(gSdlRenderer, NULL);
+
+        SDL_RenderClear(gSdlRenderer);
+        SDL_RenderCopy(gSdlRenderer, gScaledTexture, NULL, NULL);
+    } else {
+        SDL_RenderClear(gSdlRenderer);
+        SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);
+    }
 
     // The focus frame is drawn over the finished picture so the game never
     // has to redraw anything to remove it.

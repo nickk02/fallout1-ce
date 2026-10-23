@@ -159,6 +159,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     }
     video_options.scale = 1;
     video_options.fitWidth = true;
+    video_options.scaleFilter = 2;
 
     Config resolutionConfig;
     if (config_init(&resolutionConfig)) {
@@ -177,6 +178,11 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
             bool windowed;
             if (configGetBool(&resolutionConfig, "MAIN", "WINDOWED", &windowed)) {
                 video_options.fullscreen = !windowed;
+            }
+
+            int scaleFilter;
+            if (config_get_value(&resolutionConfig, "MAIN", "SCALE_FILTER", &scaleFilter) && scaleFilter >= 0 && scaleFilter <= 2) {
+                video_options.scaleFilter = scaleFilter;
             }
 
             int scaleValue;

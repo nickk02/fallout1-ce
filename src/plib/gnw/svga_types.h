@@ -22,6 +22,10 @@ typedef struct VideoOptions {
 
     // When set, `width` follows the shape of the window the display gives us.
     bool fitWidth;
+
+    // How the picture is scaled to the window: 0 nearest, 1 smooth, 2 sharp
+    // (nearest up to a whole multiple, then smooth).
+    int scaleFilter;
 } VideoOptions;
 
 } // namespace fallout

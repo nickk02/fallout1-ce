@@ -39,6 +39,9 @@ bool svga_pointer_warp_recent();
 
 // Draws a frame around `rect` (game coordinates) until cleared with `NULL`.
 void svga_set_focus_rect(const Rect* rect);
+
+// Cycles how the picture is scaled to the window: nearest, smooth, sharp.
+void svga_cycle_scale_filter();
 int screenGetWidth();
 int screenGetHeight();
 void handleWindowSizeChanged();
