@@ -159,7 +159,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     }
     video_options.scale = 1;
     video_options.fitWidth = true;
-    video_options.scaleFilter = 2;
+    video_options.scaleFilter = 5;
 
     Config resolutionConfig;
     if (config_init(&resolutionConfig)) {
