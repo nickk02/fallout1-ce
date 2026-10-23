@@ -15,6 +15,10 @@ namespace fallout {
 #define FREE_MOVE_WALK_SPEED 64.0f
 #define FREE_MOVE_RUN_SPEED 150.0f
 
+// Limits for the speed taken from the art.
+#define FREE_MOVE_MIN_SPEED 40.0f
+#define FREE_MOVE_MAX_SPEED 220.0f
+
 
 static bool active = false;
 static bool wasRunning = false;
@@ -25,6 +29,10 @@ static float frameDistance = 0.0f;
 // Pixels of travel that one frame of the current walk or run cycle covers. It
 // comes from the art, so the feet keep up with the ground at any speed.
 static float pixelsPerFrame = 5.0f;
+
+// Ground speed at which the current cycle plays at its normal frame rate. The
+// player moves at this speed, so the feet never outrun or lag the ground.
+static float poseSpeed = 0.0f;
 
 typedef struct Neighbor {
     int tile;
@@ -87,7 +95,12 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
         dirty_add(&dirty, &part);
     }
 
-    float speed = running ? FREE_MOVE_RUN_SPEED : FREE_MOVE_WALK_SPEED;
+    float speed = poseSpeed > 0.0f ? poseSpeed : (running ? FREE_MOVE_RUN_SPEED : FREE_MOVE_WALK_SPEED);
+    if (speed < FREE_MOVE_MIN_SPEED) {
+        speed = FREE_MOVE_MIN_SPEED;
+    } else if (speed > FREE_MOVE_MAX_SPEED) {
+        speed = FREE_MOVE_MAX_SPEED;
+    }
     remainderX += dirX * speed * elapsed;
     remainderY += dirY * speed * elapsed;
 
@@ -280,6 +293,7 @@ static bool free_move_set_pose(bool running, Rect* dirty)
     }
 
     pixelsPerFrame = 5.0f;
+    poseSpeed = 0.0f;
     CacheEntry* artHandle;
     Art* art = art_ptr_lock(fid, &artHandle);
     if (art != nullptr) {
@@ -300,6 +314,9 @@ static bool free_move_set_pose(bool running, Rect* dirty)
         if (frameCount > 0 && travel > 1.0f) {
             pixelsPerFrame = travel / frameCount;
         }
+
+        int fps = art_frame_fps(art);
+        poseSpeed = fps > 0 ? pixelsPerFrame * (float)fps : 0.0f;
     }
 
     Rect frameRect;
