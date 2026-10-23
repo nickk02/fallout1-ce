@@ -11,6 +11,10 @@ void stick_move_update();
 // limited by action points.
 void stick_move_update_combat();
 
+// The combat pause. Runs the action buttons and target picking, but does not
+// move the player, because time is frozen.
+void stick_move_update_paused();
+
 // Keeps the player centered on screen. Called once per frame from the map and
 // combat loops.
 void camera_follow_update();

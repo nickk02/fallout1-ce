@@ -2802,10 +2802,18 @@ static unsigned int anim_effective_tpf(Object* object, AnimationSad* sad_entry)
     return tpf;
 }
 
+static bool anim_paused = false;
+
+void anim_set_paused(bool paused)
+{
+    anim_paused = paused;
+}
+
 // 0x417498
 void object_animate()
 {
-    if (curr_sad == 0) {
+    // The combat pause freezes every animation.
+    if (anim_paused || curr_sad == 0) {
         return;
     }
 

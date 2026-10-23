@@ -100,10 +100,10 @@ void controller_world_tick()
     }
     rightTriggerDown = rightTrigger;
 
-    // The left trigger ends the turn in combat. Space does nothing elsewhere.
+    // The left trigger pauses combat. The V key does nothing elsewhere.
     bool leftTrigger = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > CONTROLLER_TRIGGER_THRESHOLD;
     if (leftTrigger && !leftTriggerDown) {
-        input_inject_key(SDL_SCANCODE_SPACE);
+        input_inject_key(SDL_SCANCODE_V);
     }
     leftTriggerDown = leftTrigger;
 }
@@ -140,6 +140,12 @@ bool controller_handle_key(int scancode, bool pressed)
         break;
     case SDL_SCANCODE_Q:
         action = CONTROLLER_ACTION_INSPECT;
+        break;
+    case SDL_SCANCODE_LEFTBRACKET:
+        action = CONTROLLER_ACTION_PREVIOUS_TARGET;
+        break;
+    case SDL_SCANCODE_RIGHTBRACKET:
+        action = CONTROLLER_ACTION_NEXT_TARGET;
         break;
     case SDL_SCANCODE_K:
         if (pressed) {
@@ -326,6 +332,12 @@ static void controller_handle_button(SDL_GameControllerButton button)
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_UP:
             input_inject_key(SDL_SCANCODE_TAB); // Automap
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+            actionPending[CONTROLLER_ACTION_PREVIOUS_TARGET] = true;
+            break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+            actionPending[CONTROLLER_ACTION_NEXT_TARGET] = true;
             break;
         case SDL_CONTROLLER_BUTTON_START:
             input_inject_key(SDL_SCANCODE_ESCAPE); // Options

@@ -33,6 +33,7 @@ namespace fallout {
 static Object* softTarget = nullptr;
 static Object* softOutlined = nullptr;
 static bool softOutlineBorrowed = false;
+static bool softWide = false;
 
 #define SOFT_TARGET_PROMPT_WIDTH 420
 #define SOFT_TARGET_PROMPT_HEIGHT 18
@@ -87,7 +88,7 @@ bool soft_target_update(bool inCombat)
     // controller is playing. In combat only enemies can be selected. With the
     // mouse, only what was clicked is highlighted. The automatic pick is shown
     // only for the keyboard and the controller.
-    if (selectedTarget != nullptr && !input_controller_in_use()) {
+    if (selectedTarget != nullptr && (!input_controller_in_use() || softWide)) {
         bool allowed = !inCombat
             || (FID_TYPE(selectedTarget->fid) == OBJ_TYPE_CRITTER && soft_target_is_hostile(selectedTarget));
         if (allowed) {
@@ -265,6 +266,62 @@ bool soft_target_interact()
     }
 
     return false;
+}
+
+void soft_target_set_wide(bool wide)
+{
+    softWide = wide;
+}
+
+void soft_target_cycle(int direction)
+{
+    // Collect the living enemies and order them by distance from the player.
+    Object** list;
+    int count = obj_create_list(-1, obj_dude->elevation, OBJ_TYPE_CRITTER, &list);
+    if (count <= 0) {
+        return;
+    }
+
+    Object* enemies[64];
+    int distances[64];
+    int enemyCount = 0;
+    for (int index = 0; index < count && enemyCount < 64; index++) {
+        if (list[index] != obj_dude && soft_target_is_hostile(list[index])) {
+            enemies[enemyCount] = list[index];
+            distances[enemyCount] = obj_dist(obj_dude, list[index]);
+            enemyCount++;
+        }
+    }
+    obj_delete_list(list);
+
+    if (enemyCount == 0) {
+        return;
+    }
+
+    for (int first = 0; first < enemyCount; first++) {
+        for (int second = first + 1; second < enemyCount; second++) {
+            if (distances[second] < distances[first]) {
+                Object* object = enemies[first];
+                enemies[first] = enemies[second];
+                enemies[second] = object;
+
+                int distance = distances[first];
+                distances[first] = distances[second];
+                distances[second] = distance;
+            }
+        }
+    }
+
+    int current = -1;
+    for (int index = 0; index < enemyCount; index++) {
+        if (enemies[index] == selectedTarget || (selectedTarget == nullptr && enemies[index] == softTarget)) {
+            current = index;
+            break;
+        }
+    }
+
+    int next = current == -1 ? 0 : (current + direction + enemyCount) % enemyCount;
+    selectedTarget = enemies[next];
 }
 
 Object* soft_target_enemy_near(int screenX, int screenY)
@@ -501,6 +558,10 @@ bool soft_target_is_hostile(Object* critter)
 static int soft_target_score(Object* object, int range)
 {
     int distance = obj_dist(obj_dude, object);
+    if (softWide) {
+        return distance <= 60 ? distance : -1;
+    }
+
     if (distance > range) {
         return -1;
     }

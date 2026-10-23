@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <unordered_map>
+#include <vector>
 
 #include "game/actions.h"
 #include "game/anim.h"
@@ -12,6 +13,7 @@
 #include "game/combatai.h"
 #include "game/damage_popup.h"
 #include "game/free_move.h"
+#include "game/soft_target.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/elevator.h"
@@ -2175,6 +2177,147 @@ static std::unordered_map<Object*, unsigned int> combat_realtime_next_turn;
 static void combat_attack_this_now(Object* a1);
 static int combat_realtime_pump();
 static void combat_realtime_loop();
+static void combat_realtime_pause();
+static void combat_pause_enqueue(Object* target);
+static void combat_pause_fire_next();
+
+// The combat pause. Time stops, the player picks targets and body parts, and
+// the shots then go out one after another while the enemies wait.
+typedef struct QueuedShot {
+    Object* target;
+    int hitMode;
+    int hitLocation;
+} QueuedShot;
+
+static bool combat_paused = false;
+static std::vector<QueuedShot> combat_pause_building;
+static std::vector<QueuedShot> combat_pause_running;
+
+// Stops time. Every animation freezes, no creature acts, and no action points
+// come back. The player aims shots at enemies, choosing a body part for each.
+// When the player resumes, the shots go out in order, and the enemies stay
+// frozen until the last one is done.
+static void combat_realtime_pause()
+{
+    if (combat_paused || !combat_realtime_active) {
+        return;
+    }
+
+    combat_paused = true;
+    anim_set_paused(true);
+    soft_target_set_wide(true);
+    combat_pause_building.clear();
+
+    unsigned int start = get_time();
+
+    char message[96];
+    snprintf(message, sizeof(message), "Time stopped. Pick enemies to shoot. V goes.");
+    display_print(message);
+
+    while (game_user_wants_to_quit == 0) {
+        sharedFpsLimiter.mark();
+
+        int input = get_input();
+        if (input == KEY_LOWERCASE_V || input == KEY_UPPERCASE_V || input == KEY_ESCAPE || input == KEY_RETURN) {
+            break;
+        }
+
+        stick_move_update_paused();
+        game_handle_input(input, true);
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    soft_target_set_wide(false);
+    anim_set_paused(false);
+    combat_paused = false;
+
+    // Time did not pass, so nothing may be late because of the pause.
+    unsigned int delta = get_time() - start;
+    for (auto& entry : combat_realtime_next_turn) {
+        entry.second += delta;
+    }
+    combat_realtime_ap_tick += delta;
+    combat_realtime_queued_at += delta;
+    damage_popup_delay_all(delta);
+
+    combat_pause_running = combat_pause_building;
+    combat_pause_building.clear();
+}
+
+// Asks for a body part and adds the shot to the queue if the action points
+// allow it.
+static void combat_pause_enqueue(Object* target)
+{
+    if (target == NULL || critter_is_dead(target)) {
+        return;
+    }
+
+    int hitMode;
+    bool aiming;
+    if (intface_get_attack(&hitMode, &aiming) == -1) {
+        return;
+    }
+
+    int used = 0;
+    for (const QueuedShot& shot : combat_pause_building) {
+        used += item_w_mp_cost(obj_dude, shot.hitMode, true);
+    }
+
+    int cost = item_w_mp_cost(obj_dude, hitMode, true);
+    char message[128];
+    if (used + cost > obj_dude->data.critter.combat.ap) {
+        snprintf(message, sizeof(message), "Not enough action points for another shot.");
+        display_print(message);
+        return;
+    }
+
+    int hitLocation;
+    if (get_called_shot_location(target, &hitLocation, hitMode) == -1) {
+        return;
+    }
+
+    QueuedShot shot;
+    shot.target = target;
+    shot.hitMode = hitMode;
+    shot.hitLocation = hitLocation;
+    combat_pause_building.push_back(shot);
+
+    snprintf(message, sizeof(message), "Shot %d: %s, %s. %d AP left.",
+        (int)combat_pause_building.size(),
+        object_name(target),
+        combat_get_loc_name(target, hitLocation),
+        obj_dude->data.critter.combat.ap - used - cost);
+    display_print(message);
+}
+
+// Takes the next queued shot. A shot that can no longer be taken is dropped.
+static void combat_pause_fire_next()
+{
+    QueuedShot shot = combat_pause_running.front();
+    combat_pause_running.erase(combat_pause_running.begin());
+
+    if (shot.target == NULL || critter_is_dead(shot.target)) {
+        return;
+    }
+
+    char message[96];
+    if (combat_check_bad_shot(obj_dude, shot.target, shot.hitMode, true) != COMBAT_BAD_SHOT_OK) {
+        snprintf(message, sizeof(message), "A queued shot could not be taken.");
+        display_print(message);
+        return;
+    }
+
+    free_move_stop();
+
+    int facing = tile_dir(obj_dude->tile, shot.target->tile);
+    if (facing != obj_dude->rotation && !critter_is_prone(obj_dude)) {
+        dude_stand(obj_dude, facing, -1);
+    }
+
+    combat_attack(obj_dude, shot.target, shot.hitMode, shot.hitLocation);
+}
 
 // Runs the player's side of the fight: movement, actions, and action point
 // refill. It returns the key the player pressed, if any.
@@ -2218,6 +2361,11 @@ static int combat_realtime_pump()
         Object* target = combat_realtime_queued_attack;
         combat_realtime_queued_attack = NULL;
         combat_attack_this_now(target);
+    }
+
+    // The shots lined up during the pause go out one after another.
+    if (!combat_paused && !combat_pause_running.empty() && combat_turn_running == 0) {
+        combat_pause_fire_next();
     }
 
     combat_realtime_pumping = false;
@@ -2273,13 +2421,19 @@ static void combat_realtime_loop()
             break;
         }
 
+        if (input == KEY_LOWERCASE_V || input == KEY_UPPERCASE_V) {
+            combat_realtime_pause();
+            input = -1;
+        }
+
         scripts_check_state_in_combat();
         game_handle_input(input, true);
 
         now = get_time();
 
-        // Creatures act one at a time, each on its own timer.
-        if (combat_turn_running == 0) {
+        // Creatures act one at a time, each on its own timer. They wait while the
+        // shots lined up in the pause go out.
+        if (combat_turn_running == 0 && combat_pause_running.empty()) {
             if (now - lastSequence >= REALTIME_SEQUENCE_INTERVAL) {
                 lastSequence = now;
                 combat_sequence();
@@ -2339,7 +2493,9 @@ void combat_turn_run()
         // keys are handled too, or they would be lost until the creature is done.
         if (combat_realtime_active) {
             int input = combat_realtime_pump();
-            if (input != -1) {
+            if (input == KEY_LOWERCASE_V || input == KEY_UPPERCASE_V) {
+                combat_realtime_pause();
+            } else if (input != -1) {
                 game_handle_input(input, true);
             }
         }
@@ -4705,6 +4861,12 @@ bool combat_to_hit(Object* target, int* accuracy)
 // 0x423D98
 void combat_attack_this(Object* a1)
 {
+    // While time is stopped an attack is only queued.
+    if (combat_paused) {
+        combat_pause_enqueue(a1);
+        return;
+    }
+
     // Only one attack can be in flight, because they share one state. A new one
     // waits for the current one to finish.
     if (combat_realtime_active && combat_turn_running != 0) {

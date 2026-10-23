@@ -49,6 +49,15 @@ void damage_popup_schedule(Object* target, int damage, bool hit, bool critical, 
     }
 }
 
+void damage_popup_delay_all(unsigned int delayMs)
+{
+    for (int index = 0; index < DAMAGE_POPUP_MAX; index++) {
+        if (popups[index].used) {
+            popups[index].showAt += delayMs;
+        }
+    }
+}
+
 void damage_popup_update()
 {
     unsigned int now = get_time();

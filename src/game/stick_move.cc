@@ -23,17 +23,22 @@ namespace fallout {
 
 static unsigned int lastMoveTicks = 0;
 
-static void stick_move_update_impl(bool inCombat);
+static void stick_move_update_impl(bool inCombat, bool paused);
 static bool stick_move_get_vector(float* x, float* y, bool* walkOnly);
 
 void stick_move_update()
 {
-    stick_move_update_impl(false);
+    stick_move_update_impl(false, false);
 }
 
 void stick_move_update_combat()
 {
-    stick_move_update_impl(true);
+    stick_move_update_impl(true, false);
+}
+
+void stick_move_update_paused()
+{
+    stick_move_update_impl(true, true);
 }
 
 void camera_follow_update()
@@ -47,7 +52,7 @@ void camera_follow_update()
     tile_follow_smooth(obj_dude->tile, obj_dude->x, obj_dude->y);
 }
 
-static void stick_move_update_impl(bool inCombat)
+static void stick_move_update_impl(bool inCombat, bool paused)
 {
     // The loop is running, so the controller drives the character and not a
     // cursor, even when a script has locked the interface for a moment.
@@ -60,6 +65,16 @@ static void stick_move_update_impl(bool inCombat)
     }
 
     soft_target_update(inCombat);
+
+    // Moving between targets works any time. During the pause it is how the
+    // player picks which enemy to shoot.
+    if (controller_take_action(CONTROLLER_ACTION_NEXT_TARGET)) {
+        soft_target_cycle(1);
+    }
+
+    if (controller_take_action(CONTROLLER_ACTION_PREVIOUS_TARGET)) {
+        soft_target_cycle(-1);
+    }
 
     bool interact = controller_take_action(CONTROLLER_ACTION_INTERACT);
     bool attack = controller_take_action(CONTROLLER_ACTION_ATTACK);
@@ -75,6 +90,11 @@ static void stick_move_update_impl(bool inCombat)
         } else {
             soft_target_inspect();
         }
+        return;
+    }
+
+    // Time is frozen, so nobody walks.
+    if (paused) {
         return;
     }
 

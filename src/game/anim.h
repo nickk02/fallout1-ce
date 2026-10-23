@@ -155,6 +155,9 @@ int make_straight_path_func(Object* a1, int from, int to, StraightPathNode* path
 int anim_move_on_stairs(Object* obj, int tile, int elevation, int anim, int animationSequenceIndex);
 int check_for_falling(Object* obj, int anim, int a3);
 void object_animate();
+
+// Freezes or resumes every animation. Used by the combat pause.
+void anim_set_paused(bool paused);
 int check_move(int* a1);
 int dude_move(int a1);
 int dude_run(int a1);

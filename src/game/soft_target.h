@@ -34,6 +34,13 @@ void soft_target_select(Object* object);
 // there is none.
 Object* soft_target_enemy_near(int screenX, int screenY);
 
+// While wide, the automatic pick considers every enemy on the map, not only
+// those close and in front of the player. The combat pause uses it.
+void soft_target_set_wide(bool wide);
+
+// Moves the selection to the next (1) or previous (-1) enemy, nearest first.
+void soft_target_cycle(int direction);
+
 // Removes the outline. Called when the map loop is not active.
 void soft_target_clear();
 
