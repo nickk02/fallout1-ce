@@ -24,7 +24,8 @@ typedef struct VideoOptions {
     bool fitWidth;
 
     // How the picture is scaled to the window: 0 nearest, 1 smooth, 2 sharp
-    // (nearest up to a whole multiple, then smooth).
+    // (nearest up to a whole multiple, then smooth), 3 and 4 enlarge the
+    // picture 2 or 3 times without blending colors first, then scale sharply.
     int scaleFilter;
 } VideoOptions;
 

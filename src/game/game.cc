@@ -181,7 +181,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
             }
 
             int scaleFilter;
-            if (config_get_value(&resolutionConfig, "MAIN", "SCALE_FILTER", &scaleFilter) && scaleFilter >= 0 && scaleFilter <= 2) {
+            if (config_get_value(&resolutionConfig, "MAIN", "SCALE_FILTER", &scaleFilter) && scaleFilter >= 0 && scaleFilter <= 4) {
                 video_options.scaleFilter = scaleFilter;
             }
 

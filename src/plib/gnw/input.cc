@@ -1117,8 +1117,11 @@ void GNW95_process_message()
             break;
         case SDL_KEYDOWN:
         case SDL_KEYUP:
-            // F9 cycles the scaling filter.
-            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F9 && e.key.repeat == 0) {
+            // F9 cycles the scaling filter. On a Mac the function keys need Fn,
+            // so Command+U does the same.
+            if (e.type == SDL_KEYDOWN && e.key.repeat == 0
+                && (e.key.keysym.scancode == SDL_SCANCODE_F9
+                    || (e.key.keysym.scancode == SDL_SCANCODE_U && (e.key.keysym.mod & KMOD_GUI) != 0))) {
                 svga_cycle_scale_filter();
                 break;
             }

@@ -25,6 +25,10 @@ SDL_Renderer* gSdlRenderer = NULL;
 SDL_Texture* gSdlTexture = NULL;
 static SDL_Texture* gScaledTexture = NULL;
 static int gScaleFilter = 2;
+
+// Pixel-art enlargement done on the palette indexes before scaling to the
+// window: 1 (off), 2 or 3.
+static int gArtScale = 1;
 static int gScaleFactor = 1;
 SDL_Surface* gSdlTextureSurface = NULL;
 
@@ -297,9 +301,13 @@ static bool createRenderer(int width, int height)
         return false;
     }
 
+    gArtScale = gScaleFilter == 3 ? 2 : (gScaleFilter == 4 ? 3 : 1);
+    int textureWidth = width * gArtScale;
+    int textureHeight = height * gArtScale;
+
     // Smooth scaling filters the picture. The others keep hard pixel edges.
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, gScaleFilter == 1 ? "linear" : "nearest");
-    gSdlTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING, width, height);
+    gSdlTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING, textureWidth, textureHeight);
     if (gSdlTexture == NULL) {
         return false;
     }
@@ -307,12 +315,12 @@ static bool createRenderer(int width, int height)
     // Sharp scaling first enlarges the picture by a whole number with hard
     // edges, then lets the window scale that smoothly. Pixels stay crisp and
     // the edges between them do not shimmer.
-    if (gScaleFilter == 2) {
+    if (gScaleFilter >= 2) {
         int outputWidth;
         int outputHeight;
         if (SDL_GetRendererOutputSize(gSdlRenderer, &outputWidth, &outputHeight) == 0 && outputWidth > 0 && outputHeight > 0) {
-            int factorX = (outputWidth + width - 1) / width;
-            int factorY = (outputHeight + height - 1) / height;
+            int factorX = (outputWidth + textureWidth - 1) / textureWidth;
+            int factorY = (outputHeight + textureHeight - 1) / textureHeight;
             gScaleFactor = factorX > factorY ? factorX : factorY;
         } else {
             gScaleFactor = 2;
@@ -325,7 +333,7 @@ static bool createRenderer(int width, int height)
         }
 
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
-        gScaledTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_TARGET, width * gScaleFactor, height * gScaleFactor);
+        gScaledTexture = SDL_CreateTexture(gSdlRenderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_TARGET, textureWidth * gScaleFactor, textureHeight * gScaleFactor);
     }
 
     Uint32 format;
@@ -366,7 +374,7 @@ static void destroyRenderer()
 
 void svga_cycle_scale_filter()
 {
-    gScaleFilter = (gScaleFilter + 1) % 3;
+    gScaleFilter = (gScaleFilter + 1) % 5;
     handleWindowSizeChanged();
 
     // The new picture buffer starts empty.
@@ -396,9 +404,93 @@ void svga_set_focus_rect(const Rect* rect)
     gFocusRectSet = true;
 }
 
+// Enlarges the 8-bit picture two or three times without blending colors. Each
+// new pixel copies one of its neighbors, so the picture keeps the game's
+// palette. Edges and diagonals look smoother and nothing gets blurry. This is
+// the Scale2x / Scale3x algorithm, working on palette indexes.
+static void svga_enlarge(const unsigned char* src, int srcPitch, int width, int height, const Uint32* palette, Uint32* dest, int destPitch, int factor)
+{
+    for (int y = 0; y < height; y++) {
+        const unsigned char* row = src + srcPitch * y;
+        const unsigned char* above = y > 0 ? row - srcPitch : row;
+        const unsigned char* below = y < height - 1 ? row + srcPitch : row;
+
+        Uint32* out = dest + (y * factor) * destPitch;
+
+        for (int x = 0; x < width; x++) {
+            int left = x > 0 ? x - 1 : x;
+            int right = x < width - 1 ? x + 1 : x;
+
+            unsigned char a = above[left];
+            unsigned char b = above[x];
+            unsigned char c = above[right];
+            unsigned char d = row[left];
+            unsigned char e = row[x];
+            unsigned char f = row[right];
+            unsigned char g = below[left];
+            unsigned char h = below[x];
+            unsigned char i = below[right];
+
+            if (factor == 2) {
+                unsigned char e0 = e, e1 = e, e2 = e, e3 = e;
+                if (b != h && d != f) {
+                    e0 = d == b ? d : e;
+                    e1 = b == f ? f : e;
+                    e2 = d == h ? d : e;
+                    e3 = h == f ? f : e;
+                }
+
+                Uint32* top = out + x * 2;
+                top[0] = palette[e0];
+                top[1] = palette[e1];
+                top[destPitch] = palette[e2];
+                top[destPitch + 1] = palette[e3];
+            } else {
+                unsigned char e0 = e, e1 = e, e2 = e, e3 = e, e5 = e, e6 = e, e7 = e, e8 = e;
+                if (b != h && d != f) {
+                    e0 = d == b ? d : e;
+                    e1 = (d == b && e != c) || (b == f && e != a) ? b : e;
+                    e2 = b == f ? f : e;
+                    e3 = (d == b && e != g) || (d == h && e != a) ? d : e;
+                    e5 = (b == f && e != i) || (h == f && e != c) ? f : e;
+                    e6 = d == h ? d : e;
+                    e7 = (d == h && e != i) || (h == f && e != g) ? h : e;
+                    e8 = h == f ? f : e;
+                }
+
+                Uint32* top = out + x * 3;
+                top[0] = palette[e0];
+                top[1] = palette[e1];
+                top[2] = palette[e2];
+                top[destPitch] = palette[e3];
+                top[destPitch + 1] = palette[e];
+                top[destPitch + 2] = palette[e5];
+                top[destPitch * 2] = palette[e6];
+                top[destPitch * 2 + 1] = palette[e7];
+                top[destPitch * 2 + 2] = palette[e8];
+            }
+        }
+    }
+}
+
 void renderPresent()
 {
-    SDL_UpdateTexture(gSdlTexture, NULL, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
+    if (gArtScale > 1 && gSdlSurface != NULL && gSdlSurface->format->palette != NULL) {
+        Uint32 palette[256];
+        const SDL_Color* colors = gSdlSurface->format->palette->colors;
+        for (int index = 0; index < 256; index++) {
+            palette[index] = ((Uint32)colors[index].r << 16) | ((Uint32)colors[index].g << 8) | colors[index].b;
+        }
+
+        void* pixels;
+        int pitch;
+        if (SDL_LockTexture(gSdlTexture, NULL, &pixels, &pitch) == 0) {
+            svga_enlarge((const unsigned char*)gSdlSurface->pixels, gSdlSurface->pitch, gSdlSurface->w, gSdlSurface->h, palette, (Uint32*)pixels, pitch / 4, gArtScale);
+            SDL_UnlockTexture(gSdlTexture);
+        }
+    } else {
+        SDL_UpdateTexture(gSdlTexture, NULL, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
+    }
 
     if (gScaledTexture != NULL) {
         // First pass: enlarge by a whole number with hard edges.
