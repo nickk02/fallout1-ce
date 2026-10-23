@@ -9,6 +9,7 @@
 #endif
 
 #include "game/main.h"
+#include "game_home.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/svga.h"
 
@@ -48,8 +49,11 @@ int main(int argc, char* argv[])
 
 #if __APPLE__ && TARGET_OS_OSX
     char* basePath = SDL_GetBasePath();
-    chdir(basePath);
+    bool haveGame = game_home_enter(basePath);
     SDL_free(basePath);
+    if (!haveGame) {
+        return EXIT_FAILURE;
+    }
 #endif
 
 #if __ANDROID__

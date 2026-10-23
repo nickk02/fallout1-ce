@@ -275,6 +275,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/audio_engine.cc"
     "src/audio_engine.h"
     "src/fps_limiter.cc"
+    "src/game_home.cc"
+    "src/game_home.h"
     "src/fps_limiter.h"
     "src/platform_compat.cc"
     "src/platform_compat.h"
@@ -341,18 +343,18 @@ if(APPLE)
         set_source_files_properties(${RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 
         set_target_properties(${EXECUTABLE_NAME} PROPERTIES
-            OUTPUT_NAME "Fallout Community Edition"
+            OUTPUT_NAME "Fallout ME"
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/os/macos/Info.plist"
             XCODE_ATTRIBUTE_EXECUTABLE_NAME "${EXECUTABLE_NAME}"
-            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.alexbatalov.fallout-ce"
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.nickk02.fallout-me"
         )
 
         set(MACOSX_BUNDLE_ICON_FILE "fallout-ce.icns")
-        set(MACOSX_BUNDLE_BUNDLE_NAME "Fallout: Community Edition")
-        set(MACOSX_BUNDLE_DISPLAY_NAME "Fallout")
+        set(MACOSX_BUNDLE_BUNDLE_NAME "Fallout ME")
+        set(MACOSX_BUNDLE_DISPLAY_NAME "Fallout ME")
     endif()
 
-    set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.alexbatalov.fallout-ce")
+    set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.nickk02.fallout-me")
     set(MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0.0")
     set(MACOSX_BUNDLE_BUNDLE_VERSION "1.0.0")
 endif()
