@@ -2,12 +2,17 @@
 
 #include <math.h>
 
+#include "game/actions.h"
 #include "game/anim.h"
 #include "game/art.h"
+#include "game/combat_defs.h"
 #include "game/critter.h"
 #include "game/object.h"
+#include "game/perk.h"
+#include "game/proto.h"
 #include "game/scripts.h"
 #include "game/tile.h"
+#include "plib/gnw/input.h"
 #include "plib/gnw/rect.h"
 
 namespace fallout {
@@ -34,6 +39,14 @@ static float pixelsPerFrame = 5.0f;
 // Ground speed at which the current cycle plays at its normal frame rate. The
 // player moves at this speed, so the feet never outrun or lag the ground.
 static float poseSpeed = 0.0f;
+
+// A closed door the player is pushing against, and when the player last asked
+// to open one.
+static Object* blockedDoor = nullptr;
+static unsigned int lastDoorAttempt = 0;
+
+// Pause between attempts to open the same door.
+#define FREE_MOVE_DOOR_COOLDOWN 1200
 
 typedef struct Neighbor {
     int tile;
@@ -68,6 +81,11 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
         return false;
     }
 
+    // Crippled legs cannot run.
+    if ((obj_dude->data.critter.combat.results & DAM_CRIP_LEG_ANY) != 0) {
+        running = false;
+    }
+
     if (!active) {
         // Another animation (an attack, a door, a talk) has the player.
         if (anim_busy(obj_dude) != 0) {
@@ -96,6 +114,11 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
         dirty_add(&dirty, &part);
     }
 
+    // Running ends sneaking unless the player has Silent Running.
+    if (running && !perk_level(PERK_SILENT_RUNNING)) {
+        pc_flag_off(PC_FLAG_SNEAKING);
+    }
+
     float speed = poseSpeed > 0.0f ? poseSpeed : (running ? FREE_MOVE_RUN_SPEED : FREE_MOVE_WALK_SPEED);
     if (speed < FREE_MOVE_MIN_SPEED) {
         speed = FREE_MOVE_MIN_SPEED;
@@ -115,6 +138,21 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
         bool moved = free_move_apply(stepX, stepY, &part)
             || (stepX != 0 && free_move_apply(stepX, 0, &part))
             || (stepY != 0 && free_move_apply(0, stepY, &part));
+
+        if (!moved && blockedDoor != nullptr) {
+            // Walking into a closed door opens it, as clicking it would.
+            unsigned int now = get_time();
+            if (now - lastDoorAttempt > FREE_MOVE_DOOR_COOLDOWN) {
+                lastDoorAttempt = now;
+                Object* door = blockedDoor;
+                blockedDoor = nullptr;
+                free_move_stop();
+                action_use_an_object(obj_dude, door);
+                return true;
+            }
+        }
+
+        blockedDoor = nullptr;
 
         if (moved) {
             dirty_add(&dirty, &part);
@@ -206,7 +244,14 @@ static bool free_move_apply(int stepX, int stepY, Rect* dirty)
         return obj_offset(obj_dude, stepX, stepY, dirty) == 0;
     }
 
-    if (obj_blocking_at(obj_dude, neighbors[best].tile, obj_dude->elevation) != NULL) {
+    Object* blocker = obj_blocking_at(obj_dude, neighbors[best].tile, obj_dude->elevation);
+    if (blocker != NULL) {
+        if (FID_TYPE(blocker->fid) == OBJ_TYPE_SCENERY) {
+            Proto* proto;
+            if (proto_ptr(blocker->pid, &proto) != -1 && proto->scenery.type == SCENERY_TYPE_DOOR) {
+                blockedDoor = blocker;
+            }
+        }
         return false;
     }
 
