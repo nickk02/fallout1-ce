@@ -50,6 +50,13 @@ int intface_get_attack(int* hitMode, bool* aiming);
 int intface_update_items(bool animated);
 int intface_toggle_items(bool animated);
 int intface_toggle_item_state();
+
+// Makes `hand` (HAND_LEFT is Item 1, HAND_RIGHT is Item 2) the active item.
+void intface_select_item(int hand);
+
+// Fills the weapon in the active hand from the ammo the player carries. Returns
+// `true` if it took any.
+bool intface_reload_active();
 void intface_use_item();
 int intface_is_item_right_hand();
 int intface_get_current_item(Object** itemPtr);

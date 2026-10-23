@@ -925,12 +925,8 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
             soft_target_select(NULL);
 
-            int actionPoints;
-            if (isInCombat()) {
-                actionPoints = combat_free_move + obj_dude->data.critter.combat.ap;
-            } else {
-                actionPoints = -1;
-            }
+            // Movement is free, in a fight too.
+            int actionPoints = -1;
 
             bool running;
             configGetBool(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_RUNNING_KEY, &running);

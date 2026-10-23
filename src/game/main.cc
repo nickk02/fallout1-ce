@@ -15,6 +15,7 @@
 
 #include "game/amutex.h"
 #include "game/art.h"
+#include "game/combat.h"
 #include "game/credits.h"
 #include "game/cycle.h"
 #include "game/endgame.h"
@@ -325,8 +326,14 @@ static void main_game_loop()
         sharedFpsLimiter.mark();
 
         stick_move_update();
+        combat_vats_update();
 
         int keyCode = get_input();
+        if (keyCode == KEY_LOWERCASE_V || keyCode == KEY_UPPERCASE_V) {
+            combat_vats_pause();
+            keyCode = -1;
+        }
+
         game_handle_input(keyCode, false);
 
         // After the animations ran for this frame, so the view and the player

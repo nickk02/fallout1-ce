@@ -239,11 +239,8 @@ bool soft_target_interact()
     soft_target_hide_prompt();
 
     if (isInCombat()) {
-        // In combat the only action is attacking an enemy.
-        if (FID_TYPE(target->fid) == OBJ_TYPE_CRITTER && soft_target_is_hostile(target)) {
-            combat_attack_this(target);
-            return true;
-        }
+        // In a fight the only thing to do with an enemy is attack it, and that
+        // has its own button.
         return false;
     }
 
@@ -253,7 +250,8 @@ bool soft_target_interact()
         return true;
     case OBJ_TYPE_CRITTER:
         if (soft_target_is_hostile(target)) {
-            combat_attack_this(target);
+            // Attacking has its own button.
+            return false;
         } else if (obj_action_can_talk_to(target)) {
             action_talk_to(obj_dude, target);
         } else {
@@ -387,8 +385,8 @@ static int soft_target_describe(Object* target, bool inCombat, char* title, size
             actions[count].kind = PROMPT_ACTION_USE;
             snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Search", use);
         } else if (soft_target_is_hostile(target)) {
-            actions[count].kind = PROMPT_ACTION_USE;
-            snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Attack", use);
+            actions[count].kind = PROMPT_ACTION_ATTACK;
+            snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] Attack", attack);
         } else {
             actions[count].kind = PROMPT_ACTION_USE;
             snprintf(actions[count++].label, sizeof(actions[0].label), "[%s] %s", use, obj_action_can_talk_to(target) ? "Talk" : "Search");

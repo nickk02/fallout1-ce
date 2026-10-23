@@ -146,7 +146,8 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     VideoOptions video_options;
     video_options.width = 1280;
     video_options.height = 720;
-    video_options.fullscreen = false;
+    // The game starts full screen. WINDOWED=1 in f1_res.ini opens a window.
+    video_options.fullscreen = true;
 
     // Match the display's shape so fullscreen has no black bars. The height
     // stays at 720 and the width follows the aspect ratio.
@@ -183,6 +184,11 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
             int scaleFilter;
             if (config_get_value(&resolutionConfig, "MAIN", "SCALE_FILTER", &scaleFilter) && scaleFilter >= 0 && scaleFilter <= 5) {
                 video_options.scaleFilter = scaleFilter;
+            }
+
+            bool realtimeCombat;
+            if (configGetBool(&resolutionConfig, "MAIN", "REALTIME_COMBAT", &realtimeCombat)) {
+                combat_set_realtime(realtimeCombat);
             }
 
             int scaleValue;
@@ -568,9 +574,20 @@ int game_handle_input(int eventCode, bool isInCombatMode)
             intface_toggle_item_state();
         }
         break;
+    case KEY_UPPERCASE_R:
+    case KEY_LOWERCASE_R:
+        // Reload the weapon in the active hand.
+        if (intface_is_enabled()) {
+            intface_reload_active();
+        }
+        break;
     case KEY_UPPERCASE_M:
     case KEY_LOWERCASE_M:
-        // The cursor modes are gone. Actions come from the target prompt.
+        // Next attack mode of the weapon in the active hand.
+        if (intface_is_enabled()) {
+            gsound_play_sfx_file("ib1p1xx1");
+            intface_toggle_item_state();
+        }
         break;
     case KEY_UPPERCASE_B:
     case KEY_LOWERCASE_B:
@@ -707,6 +724,11 @@ int game_handle_input(int eventCode, bool isInCombatMode)
 
         break;
     case KEY_1:
+        // Item 1.
+        if (intface_is_enabled()) {
+            intface_select_item(HAND_LEFT);
+        }
+        break;
     case KEY_EXCLAMATION:
         if (intface_is_enabled()) {
             gsound_play_sfx_file("ib1p1xx1");
@@ -715,6 +737,11 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         }
         break;
     case KEY_2:
+        // Item 2.
+        if (intface_is_enabled()) {
+            intface_select_item(HAND_RIGHT);
+        }
+        break;
     case KEY_AT:
         if (intface_is_enabled()) {
             gsound_play_sfx_file("ib1p1xx1");
