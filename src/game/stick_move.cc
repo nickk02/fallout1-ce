@@ -114,7 +114,12 @@ static void stick_move_update_impl(bool inCombat, bool paused)
         elapsed = 0.1f;
     }
 
-    bool running = !walkOnly && sqrtf(x * x + y * y) >= STICK_MOVE_RUN_THRESHOLD;
+    // Once running, the stick may drop a little before the character slows to a
+    // walk, so the cycle does not flip back and forth at the threshold.
+    static bool wasRunning = false;
+    float deflection = sqrtf(x * x + y * y);
+    bool running = !walkOnly && deflection >= (wasRunning ? STICK_MOVE_RUN_THRESHOLD - 0.15f : STICK_MOVE_RUN_THRESHOLD);
+    wasRunning = running;
     free_move_step(x, y, running, elapsed);
 }
 
