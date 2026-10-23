@@ -2204,6 +2204,7 @@ static void combat_realtime_pause()
     }
 
     combat_paused = true;
+    gsound_play_sfx_file("icombat1");
     anim_set_paused(true);
     soft_target_set_wide(true);
     combat_pause_building.clear();
@@ -2232,6 +2233,7 @@ static void combat_realtime_pause()
     soft_target_set_wide(false);
     anim_set_paused(false);
     combat_paused = false;
+    gsound_play_sfx_file("icombat2");
 
     // Time did not pass, so nothing may be late because of the pause.
     unsigned int delta = get_time() - start;
@@ -2283,6 +2285,7 @@ static void combat_pause_enqueue(Object* target)
     shot.hitMode = hitMode;
     shot.hitLocation = hitLocation;
     combat_pause_building.push_back(shot);
+    gsound_play_sfx_file("ib1p1xx1");
 
     snprintf(message, sizeof(message), "Shot %d: %s, %s. %d AP left.",
         (int)combat_pause_building.size(),
