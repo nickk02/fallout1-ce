@@ -326,10 +326,12 @@ static void main_game_loop()
 
         stick_move_update();
 
-        camera_follow_update();
-
         int keyCode = get_input();
         game_handle_input(keyCode, false);
+
+        // After the animations ran for this frame, so the view and the player
+        // are drawn at the same position.
+        camera_follow_update();
 
         scripts_check_state();
 

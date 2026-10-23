@@ -166,6 +166,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/game/stat.cc"
     "src/game/soft_target.cc"
     "src/game/soft_target.h"
+    "src/game/free_move.cc"
+    "src/game/free_move.h"
     "src/game/stat.h"
     "src/game/stick_move.cc"
     "src/game/stick_move.h"

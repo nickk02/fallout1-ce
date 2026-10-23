@@ -60,6 +60,11 @@ void input_set_mouse_active(bool active);
 // Draws the cursor without giving navigation back to the mouse.
 void input_show_cursor();
 
+// The controller or the keyboard took over from the mouse. Only the controller
+// changes which button names the prompt shows.
+void input_note_controller();
+void input_note_keyboard();
+
 // `true` while a controller is connected and the mouse is not the active
 // device.
 bool input_controller_in_use();

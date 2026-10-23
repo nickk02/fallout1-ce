@@ -1126,13 +1126,13 @@ void GNW95_process_message()
             // WASD moves the character while the map is active, so the game
             // never sees those keys.
             if (controller_world_is_active() && input_is_move_key(e.key.keysym.scancode)) {
-                input_set_mouse_active(false);
+                input_note_keyboard();
                 break;
             }
 
             // Keyboard counterparts of the controller's action buttons.
             if (controller_world_is_active() && controller_handle_key(e.key.keysym.scancode, e.type == SDL_KEYDOWN && e.key.repeat == 0)) {
-                input_set_mouse_active(false);
+                input_note_keyboard();
                 break;
             }
 
@@ -1235,6 +1235,7 @@ static void GNW95_process_key(KeyboardData* data)
 }
 
 static bool mouseActive = true;
+static bool padActive = false;
 
 void input_set_mouse_active(bool active)
 {
@@ -1244,6 +1245,9 @@ void input_set_mouse_active(bool active)
 
     mouseActive = active;
     mouse_set_invisible(!active);
+    if (active) {
+        padActive = false;
+    }
 
     // The menu focus frame belongs to the controller.
     if (active) {
@@ -1251,9 +1255,21 @@ void input_set_mouse_active(bool active)
     }
 }
 
+void input_note_controller()
+{
+    padActive = true;
+    input_set_mouse_active(false);
+}
+
+void input_note_keyboard()
+{
+    padActive = false;
+    input_set_mouse_active(false);
+}
+
 bool input_controller_in_use()
 {
-    return !mouseActive && controller_is_connected();
+    return padActive && !mouseActive && controller_is_connected();
 }
 
 void input_show_cursor()

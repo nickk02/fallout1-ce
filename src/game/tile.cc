@@ -7,6 +7,8 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
+#include <SDL.h>
+
 #include "game/config.h"
 #include "game/gconfig.h"
 #include "game/gmouse.h"
@@ -511,6 +513,84 @@ void tile_follow(int tile, int dx, int dy)
     } else {
         tile_set_center(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
     }
+}
+
+// Smooth camera. The creature's animation moves it in lumps at the animation
+// rate, so the view eases toward it every frame instead of copying each lump.
+// `follow_x`/`follow_y` is the view's offset from the center tile, in pixels.
+static float follow_x = 0.0f;
+static float follow_y = 0.0f;
+static unsigned int follow_ticks = 0;
+
+void tile_follow_smooth(int tile, int offsetX, int offsetY)
+{
+    int centerX;
+    int centerY;
+    int targetX;
+    int targetY;
+    if (tile_coord(tile_center_tile, &centerX, &centerY, map_elevation) == -1
+        || tile_coord(tile, &targetX, &targetY, map_elevation) == -1) {
+        tile_follow(tile, offsetX, offsetY);
+        return;
+    }
+
+    // Where the creature is, relative to the center tile.
+    float goalX = (float)(targetX - centerX + offsetX);
+    float goalY = (float)(targetY - centerY + offsetY);
+
+    unsigned int now = SDL_GetTicks();
+    float elapsed = (now - follow_ticks) / 1000.0f;
+    follow_ticks = now;
+    if (elapsed > 0.1f) {
+        elapsed = 0.1f;
+    }
+
+    if (fabsf(goalX - follow_x) > 320.0f || fabsf(goalY - follow_y) > 320.0f) {
+        // A jump, such as a new map or a teleport. Do not glide across it.
+        follow_x = goalX;
+        follow_y = goalY;
+    } else {
+        float ease = 1.0f - expf(-elapsed * 14.0f);
+        follow_x += (goalX - follow_x) * ease;
+        follow_y += (goalY - follow_y) * ease;
+    }
+
+    // Keep the offset small by moving the center tile along with the view.
+    if (fabsf(follow_x) > 48.0f || fabsf(follow_y) > 36.0f) {
+        int newX = (int)lroundf(follow_x);
+        int newY = (int)lroundf(follow_y);
+
+        int previousX = tile_pixel_dx;
+        int previousY = tile_pixel_dy;
+
+        // Find the tile under the view's center by walking to the creature's
+        // tile, which is close to it.
+        int rebaseX = targetX - centerX;
+        int rebaseY = targetY - centerY;
+
+        tile_pixel_dx = (int)lroundf(follow_x - rebaseX);
+        tile_pixel_dy = (int)lroundf(follow_y - rebaseY);
+        if (tile_set_center(tile, TILE_SET_CENTER_REFRESH_WINDOW) == 0) {
+            follow_x -= rebaseX;
+            follow_y -= rebaseY;
+        } else {
+            tile_pixel_dx = previousX;
+            tile_pixel_dy = previousY;
+            (void)newX;
+            (void)newY;
+        }
+        return;
+    }
+
+    int pixelX = (int)lroundf(follow_x);
+    int pixelY = (int)lroundf(follow_y);
+    if (pixelX == tile_pixel_dx && pixelY == tile_pixel_dy) {
+        return;
+    }
+
+    tile_pixel_dx = pixelX;
+    tile_pixel_dy = pixelY;
+    tile_set_center(tile_center_tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
 }
 
 // 0x49DEDC

@@ -30,6 +30,10 @@ int tile_set_center(int tile, int flags);
 // Centers the view on `tile` shifted by `dx`, `dy` pixels. Used to follow a
 // moving critter smoothly between tiles.
 void tile_follow(int tile, int dx, int dy);
+
+// Same, but the view eases toward the creature each frame, so the camera
+// stays smooth even when the creature moves in uneven steps.
+void tile_follow_smooth(int tile, int offsetX, int offsetY);
 void tile_toggle_roof(int a1);
 int tile_roof_visible();
 int tile_coord(int tile, int* x, int* y, int elevation);

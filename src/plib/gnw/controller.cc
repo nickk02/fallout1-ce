@@ -73,7 +73,7 @@ void controller_handle_event(SDL_Event* event)
         break;
     case SDL_CONTROLLERBUTTONDOWN:
         if (controller != nullptr && event->cbutton.which == controllerId && !controllerSuppressed) {
-            input_set_mouse_active(false);
+            input_note_controller();
             controller_handle_button((SDL_GameControllerButton)event->cbutton.button);
         }
         break;
@@ -121,7 +121,7 @@ bool controller_get_move_vector(float* x, float* y)
 
     controller_read_stick(SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY, x, y);
     if (*x != 0.0f || *y != 0.0f) {
-        input_set_mouse_active(false);
+        input_note_controller();
         return true;
     }
 
@@ -207,7 +207,7 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
     }
 
     if (dirX != 0 || dirY != 0) {
-        input_set_mouse_active(false);
+        input_note_controller();
     }
 
     static int lastDirX = 0;
