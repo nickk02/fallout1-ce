@@ -1,6 +1,7 @@
 #include "plib/gnw/svga.h"
 
 #include <math.h>
+#include <stdlib.h>
 
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -301,7 +302,7 @@ static bool createRenderer(int width, int height)
         return false;
     }
 
-    gArtScale = gScaleFilter == 3 ? 2 : (gScaleFilter == 4 ? 3 : 1);
+    gArtScale = (gScaleFilter == 3 || gScaleFilter == 5) ? 2 : (gScaleFilter == 4 ? 3 : 1);
     int textureWidth = width * gArtScale;
     int textureHeight = height * gArtScale;
 
@@ -374,7 +375,7 @@ static void destroyRenderer()
 
 void svga_cycle_scale_filter()
 {
-    gScaleFilter = (gScaleFilter + 1) % 5;
+    gScaleFilter = (gScaleFilter + 1) % 6;
     handleWindowSizeChanged();
 
     // The new picture buffer starts empty.
@@ -473,6 +474,87 @@ static void svga_enlarge(const unsigned char* src, int srcPitch, int width, int 
     }
 }
 
+// Like the enlargement above, but the corner of a diagonal edge is a blend of
+// the two colors instead of a copy of one, so slanted lines look anti-aliased.
+// Colors only need to be similar, not equal, so soft gradients in the art are
+// treated as edges too. It works in full color, so it is only used for output.
+static inline Uint32 svga_mix(Uint32 first, Uint32 second, int secondWeight)
+{
+    // secondWeight is out of 4.
+    Uint32 rb = ((first & 0xFF00FF) * (4 - secondWeight) + (second & 0xFF00FF) * secondWeight) >> 2;
+    Uint32 g = ((first & 0x00FF00) * (4 - secondWeight) + (second & 0x00FF00) * secondWeight) >> 2;
+    return (rb & 0xFF00FF) | (g & 0x00FF00);
+}
+
+static void svga_enlarge_smooth(const unsigned char* src, int srcPitch, int width, int height, const Uint32* palette, Uint32* dest, int destPitch)
+{
+    // Which palette colors count as the same region.
+    static unsigned char similar[256][256];
+    for (int first = 0; first < 256; first++) {
+        int r1 = (palette[first] >> 16) & 0xFF;
+        int g1 = (palette[first] >> 8) & 0xFF;
+        int b1 = palette[first] & 0xFF;
+        for (int second = first; second < 256; second++) {
+            int r2 = (palette[second] >> 16) & 0xFF;
+            int g2 = (palette[second] >> 8) & 0xFF;
+            int b2 = palette[second] & 0xFF;
+            int distance = abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2);
+            unsigned char value = distance <= 40 ? 1 : 0;
+            similar[first][second] = value;
+            similar[second][first] = value;
+        }
+    }
+
+    for (int y = 0; y < height; y++) {
+        const unsigned char* row = src + srcPitch * y;
+        const unsigned char* above = y > 0 ? row - srcPitch : row;
+        const unsigned char* below = y < height - 1 ? row + srcPitch : row;
+
+        Uint32* out = dest + (y * 2) * destPitch;
+
+        for (int x = 0; x < width; x++) {
+            int left = x > 0 ? x - 1 : x;
+            int right = x < width - 1 ? x + 1 : x;
+
+            unsigned char b = above[x];
+            unsigned char d = row[left];
+            unsigned char e = row[x];
+            unsigned char f = row[right];
+            unsigned char h = below[x];
+
+            Uint32 center = palette[e];
+            Uint32 c0 = center;
+            Uint32 c1 = center;
+            Uint32 c2 = center;
+            Uint32 c3 = center;
+
+            // A corner is blended toward its two neighbors when they agree with
+            // each other and differ from the pixels on the other side.
+            if (similar[d][b] && !similar[b][f] && !similar[d][h] && !similar[e][d]) {
+                c0 = svga_mix(center, svga_mix(palette[d], palette[b], 2), 3);
+            }
+
+            if (similar[b][f] && !similar[b][d] && !similar[f][h] && !similar[e][b]) {
+                c1 = svga_mix(center, svga_mix(palette[b], palette[f], 2), 3);
+            }
+
+            if (similar[d][h] && !similar[d][b] && !similar[h][f] && !similar[e][d]) {
+                c2 = svga_mix(center, svga_mix(palette[d], palette[h], 2), 3);
+            }
+
+            if (similar[h][f] && !similar[d][h] && !similar[b][f] && !similar[e][h]) {
+                c3 = svga_mix(center, svga_mix(palette[h], palette[f], 2), 3);
+            }
+
+            Uint32* top = out + x * 2;
+            top[0] = c0;
+            top[1] = c1;
+            top[destPitch] = c2;
+            top[destPitch + 1] = c3;
+        }
+    }
+}
+
 void renderPresent()
 {
     if (gArtScale > 1 && gSdlSurface != NULL && gSdlSurface->format->palette != NULL) {
@@ -485,7 +567,11 @@ void renderPresent()
         void* pixels;
         int pitch;
         if (SDL_LockTexture(gSdlTexture, NULL, &pixels, &pitch) == 0) {
-            svga_enlarge((const unsigned char*)gSdlSurface->pixels, gSdlSurface->pitch, gSdlSurface->w, gSdlSurface->h, palette, (Uint32*)pixels, pitch / 4, gArtScale);
+            if (gScaleFilter == 5) {
+                svga_enlarge_smooth((const unsigned char*)gSdlSurface->pixels, gSdlSurface->pitch, gSdlSurface->w, gSdlSurface->h, palette, (Uint32*)pixels, pitch / 4);
+            } else {
+                svga_enlarge((const unsigned char*)gSdlSurface->pixels, gSdlSurface->pitch, gSdlSurface->w, gSdlSurface->h, palette, (Uint32*)pixels, pitch / 4, gArtScale);
+            }
             SDL_UnlockTexture(gSdlTexture);
         }
     } else {
