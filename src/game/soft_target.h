@@ -29,6 +29,11 @@ bool soft_target_is_hostile(Object* critter);
 // the keys or the buttons of the prompt.
 void soft_target_select(Object* object);
 
+// Finds an enemy at a screen position. Clicking a small creature exactly is
+// hard, so this also accepts an enemy on a neighboring hex. Returns `NULL` when
+// there is none.
+Object* soft_target_enemy_near(int screenX, int screenY);
+
 // Removes the outline. Called when the map loop is not active.
 void soft_target_clear();
 

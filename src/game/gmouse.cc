@@ -644,14 +644,18 @@ void gmouse_bk_process()
     case MOUSE_CURSOR_SMALL_ARROW_DOWN:
     case MOUSE_CURSOR_CROSSHAIR:
     case MOUSE_CURSOR_USE_CROSSHAIR:
-        gmouse_set_cursor(MOUSE_CURSOR_NONE);
+        // The map shows a normal pointer. The highlighted hex that used to be
+        // the cursor is gone.
+        gmouse_set_cursor(MOUSE_CURSOR_ARROW);
 
-        if (!gmouse_3d_is_on()) {
-            gmouse_3d_on();
+        if (gmouse_3d_is_on()) {
+            gmouse_3d_off();
         }
 
         break;
     }
+
+    return;
 
     Rect r1;
     if (gmouse_3d_move_to(mouseX, mouseY, map_elevation, &r1) == 0) {
@@ -892,12 +896,30 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             // A click on an object only selects it. Its actions then come from
             // the prompt above the interface bar or from the keys. A click on
             // the ground still moves.
+            // Enemies come first and are picked generously, because small
+            // creatures are hard to hit exactly with the pointer.
+            Object* enemy = object_under_mouse(OBJ_TYPE_CRITTER, false, map_elevation);
+            if (enemy == NULL || !soft_target_is_hostile(enemy)) {
+                enemy = soft_target_enemy_near(mouseX, mouseY);
+            }
+
+            if (enemy != NULL) {
+                soft_target_select(enemy);
+                combat_attack_this(enemy);
+                return;
+            }
+
             Object* clicked = object_under_mouse(-1, true, map_elevation);
             if (clicked != NULL && clicked != obj_dude
                 && (FID_TYPE(clicked->fid) == OBJ_TYPE_CRITTER
                     || FID_TYPE(clicked->fid) == OBJ_TYPE_ITEM
                     || (FID_TYPE(clicked->fid) == OBJ_TYPE_SCENERY && proto_action_can_use(clicked->pid)))) {
                 soft_target_select(clicked);
+
+                // Clicking an enemy attacks it.
+                if (FID_TYPE(clicked->fid) == OBJ_TYPE_CRITTER && soft_target_is_hostile(clicked)) {
+                    combat_attack_this(clicked);
+                }
                 return;
             }
 

@@ -1267,6 +1267,11 @@ void input_note_keyboard()
     input_set_mouse_active(false);
 }
 
+bool input_mouse_is_active()
+{
+    return mouseActive;
+}
+
 bool input_controller_in_use()
 {
     return padActive && !mouseActive && controller_is_connected();

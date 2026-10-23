@@ -69,6 +69,9 @@ void input_note_keyboard();
 // device.
 bool input_controller_in_use();
 
+// `true` while the mouse is the device being used.
+bool input_mouse_is_active();
+
 // `true` for the keys that move the character (WASD).
 bool input_is_move_key(int scancode);
 

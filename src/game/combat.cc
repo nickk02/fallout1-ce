@@ -10,6 +10,8 @@
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/combatai.h"
+#include "game/damage_popup.h"
+#include "game/free_move.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/elevator.h"
@@ -1810,6 +1812,12 @@ static void combat_begin_extra(Object* a1)
 
     combat_highlight = 2;
     config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_TARGET_HIGHLIGHT_KEY, &combat_highlight);
+
+    // Real-time combat does not outline every creature. The target is
+    // highlighted when it is clicked or picked.
+    if (combat_realtime) {
+        combat_highlight = 0;
+    }
 }
 
 // 0x41FF48
@@ -2146,12 +2154,21 @@ void combat_end()
 // over time. Creatures still decide through the original AI, one at a time, and
 // the player's input keeps running while they act.
 #define REALTIME_AI_INTERVAL 1600
-#define REALTIME_AP_INTERVAL 450
+#define REALTIME_AP_INTERVAL 200
+
+// Least action points an enemy gets for one turn, and the pause before an
+// enemy first acts, so the player can react.
+#define REALTIME_ENEMY_MIN_AP 3
+#define REALTIME_AI_FIRST_DELAY 900
 #define REALTIME_SEQUENCE_INTERVAL 5000
 
 static bool combat_realtime_active = false;
 static bool combat_realtime_pumping = false;
 static Object* combat_realtime_queued_attack = NULL;
+static unsigned int combat_realtime_queued_at = 0;
+
+// How long a buffered attack waits for action points or a free attack state.
+#define REALTIME_ATTACK_BUFFER 1500
 static unsigned int combat_realtime_ap_tick = 0;
 static std::unordered_map<Object*, unsigned int> combat_realtime_next_turn;
 
@@ -2180,13 +2197,23 @@ static int combat_realtime_pump()
         }
     }
 
+    // Nothing in real-time combat may leave the interface locked.
+    if (game_ui_is_disabled()) {
+        game_ui_enable();
+    }
+
     stick_move_update_combat();
+    damage_popup_update();
 
     int input = get_input();
     camera_follow_update();
 
     // The attack queued while an animation was still running goes out as soon
     // as the shared attack state is free again.
+    if (combat_realtime_queued_attack != NULL && now - combat_realtime_queued_at > REALTIME_ATTACK_BUFFER) {
+        combat_realtime_queued_attack = NULL;
+    }
+
     if (combat_realtime_queued_attack != NULL && combat_turn_running == 0) {
         Object* target = combat_realtime_queued_attack;
         combat_realtime_queued_attack = NULL;
@@ -2266,7 +2293,13 @@ static void combat_realtime_loop()
                 }
 
                 auto found = combat_realtime_next_turn.find(critter);
-                if (found == combat_realtime_next_turn.end() || now >= found->second) {
+                if (found == combat_realtime_next_turn.end()) {
+                    // A creature that has just joined waits before it acts.
+                    combat_realtime_next_turn[critter] = now + REALTIME_AI_FIRST_DELAY;
+                    continue;
+                }
+
+                if (now >= found->second) {
                     next = critter;
                     break;
                 }
@@ -2302,9 +2335,13 @@ void combat_turn_run()
 
         process_bk();
 
-        // The player keeps moving and attacking while a creature acts.
+        // The player keeps moving and attacking while a creature acts. Clicks and
+        // keys are handled too, or they would be lost until the creature is done.
         if (combat_realtime_active) {
-            combat_realtime_pump();
+            int input = combat_realtime_pump();
+            if (input != -1) {
+                game_handle_input(input, true);
+            }
         }
 
         renderPresent();
@@ -2403,6 +2440,13 @@ static int combat_turn(Object* a1, bool a2)
             action_points = stat_level(a1, STAT_MAXIMUM_ACTION_POINTS);
             if (gcsd != NULL) {
                 action_points += gcsd->actionPointsBonus;
+            }
+            // In real-time combat each creature turn is a single action, such as
+            // one attack or a few steps, so an enemy cannot chain attacks while
+            // the player waits.
+            if (combat_realtime && a1 != obj_dude) {
+                int single = action_points / 2;
+                action_points = single < REALTIME_ENEMY_MIN_AP ? REALTIME_ENEMY_MIN_AP : single;
             }
             a1->data.critter.combat.ap = action_points;
         }
@@ -2706,6 +2750,12 @@ int combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocati
 
     if (action_attack(&main_ctd) == -1) {
         return -1;
+    }
+
+    // Real-time combat shows the number above the target when the blow lands.
+    if (combat_realtime && main_ctd.defender != NULL) {
+        bool hit = (main_ctd.attackerFlags & DAM_HIT) != 0;
+        damage_popup_schedule(main_ctd.defender, main_ctd.defenderDamage, hit, (main_ctd.attackerFlags & DAM_CRITICAL) != 0, 220);
     }
 
     if (actionPoints > attacker->data.critter.combat.ap) {
@@ -4240,7 +4290,10 @@ static void combat_display_flags(char* dest, int flags, Object* critter)
 // 0x42344C
 void combat_anim_begin()
 {
-    if (++combat_turn_running == 1 && obj_dude == main_ctd.attacker) {
+    // Real-time combat never locks the interface during an animation. Several
+    // animations run at once, so the lock would often stay on and swallow
+    // clicks.
+    if (++combat_turn_running == 1 && obj_dude == main_ctd.attacker && !combat_realtime) {
         game_ui_disable(1);
         gmouse_set_cursor(26);
         if (combat_highlight == 2) {
@@ -4656,6 +4709,7 @@ void combat_attack_this(Object* a1)
     // waits for the current one to finish.
     if (combat_realtime_active && combat_turn_running != 0) {
         combat_realtime_queued_attack = a1;
+        combat_realtime_queued_at = get_time();
         return;
     }
 
@@ -4702,6 +4756,16 @@ static void combat_attack_this_now(Object* a1)
         }
         return;
     case COMBAT_BAD_SHOT_NOT_ENOUGH_AP:
+        // Hold the press until the action points are back, so the player can
+        // keep the button down and attack as fast as the cooldown allows.
+        if (combat_realtime_active) {
+            if (combat_realtime_queued_attack == NULL) {
+                combat_realtime_queued_at = get_time();
+            }
+            combat_realtime_queued_attack = a1;
+            return;
+        }
+
         item = item_hit_with(obj_dude, hitMode);
         messageListItem.num = 100; // You need %d action points.
         if (message_search(&combat_message_file, &messageListItem)) {
@@ -4730,6 +4794,17 @@ static void combat_attack_this_now(Object* a1)
             display_print(messageListItem.text);
         }
         return;
+    }
+
+    // Face the target first. A swing that starts while the player still looks
+    // the other way would punch the air.
+    if (combat_realtime) {
+        free_move_stop();
+
+        int facing = tile_dir(obj_dude->tile, a1->tile);
+        if (facing != obj_dude->rotation && !critter_is_prone(obj_dude)) {
+            dude_stand(obj_dude, facing, -1);
+        }
     }
 
     if (!isInCombat()) {

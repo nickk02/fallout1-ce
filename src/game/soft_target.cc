@@ -32,6 +32,7 @@ namespace fallout {
 
 static Object* softTarget = nullptr;
 static Object* softOutlined = nullptr;
+static bool softOutlineBorrowed = false;
 
 #define SOFT_TARGET_PROMPT_WIDTH 420
 #define SOFT_TARGET_PROMPT_HEIGHT 18
@@ -83,13 +84,19 @@ bool soft_target_update(bool inCombat)
     }
 
     // A selection from the mouse wins over the automatic pick, unless the
-    // controller is playing. In combat only enemies can be selected.
+    // controller is playing. In combat only enemies can be selected. With the
+    // mouse, only what was clicked is highlighted. The automatic pick is shown
+    // only for the keyboard and the controller.
     if (selectedTarget != nullptr && !input_controller_in_use()) {
         bool allowed = !inCombat
             || (FID_TYPE(selectedTarget->fid) == OBJ_TYPE_CRITTER && soft_target_is_hostile(selectedTarget));
         if (allowed) {
             best = selectedTarget;
+        } else if (input_mouse_is_active()) {
+            best = nullptr;
         }
+    } else if (input_mouse_is_active()) {
+        best = nullptr;
     }
 
     softTarget = best;
@@ -258,6 +265,44 @@ bool soft_target_interact()
     }
 
     return false;
+}
+
+Object* soft_target_enemy_near(int screenX, int screenY)
+{
+    int center = tile_num(screenX, screenY, obj_dude->elevation);
+    if (center == -1) {
+        return nullptr;
+    }
+
+    // The clicked hex first, then its neighbors.
+    for (int ring = 0; ring <= ROTATION_COUNT; ring++) {
+        int tile = ring == 0 ? center : tile_num_in_direction(center, ring - 1, 1);
+        if (tile == -1) {
+            continue;
+        }
+
+        Object** objects;
+        int count = obj_create_list(tile, obj_dude->elevation, OBJ_TYPE_CRITTER, &objects);
+        if (count <= 0) {
+            continue;
+        }
+
+        Object* found = nullptr;
+        for (int index = 0; index < count; index++) {
+            if (objects[index] != obj_dude && soft_target_is_hostile(objects[index])) {
+                found = objects[index];
+                break;
+            }
+        }
+
+        obj_delete_list(objects);
+
+        if (found != nullptr) {
+            return found;
+        }
+    }
+
+    return nullptr;
 }
 
 void soft_target_clear()
@@ -475,16 +520,26 @@ static int soft_target_score(Object* object, int range)
 
 static void soft_target_set_outline(Object* object)
 {
+    Rect rect;
+
     if (object == softOutlined) {
+        // Combat switches creature outlines off when it starts. Put ours back.
+        if (object != nullptr && (object->outline & OUTLINE_DISABLED) != 0) {
+            if (obj_turn_on_outline(object, &rect) == 0) {
+                tile_refresh_rect(&rect, map_elevation);
+            }
+        }
         return;
     }
 
-    Rect rect;
     if (softOutlined != nullptr) {
-        if (obj_remove_outline(softOutlined, &rect) == 0) {
+        // An outline that combat already owned is only switched off.
+        int result = softOutlineBorrowed ? obj_turn_off_outline(softOutlined, &rect) : obj_remove_outline(softOutlined, &rect);
+        if (result == 0) {
             tile_refresh_rect(&rect, map_elevation);
         }
         softOutlined = nullptr;
+        softOutlineBorrowed = false;
     }
 
     if (object != nullptr) {
@@ -493,10 +548,14 @@ static void soft_target_set_outline(Object* object)
             outlineType = soft_target_is_hostile(object) ? OUTLINE_TYPE_HOSTILE : OUTLINE_TYPE_FRIENDLY;
         }
 
-        int outlineResult = obj_outline_object(object, outlineType, &rect);
-        if (outlineResult == 0) {
+        if (obj_outline_object(object, outlineType, &rect) == 0) {
             tile_refresh_rect(&rect, map_elevation);
             softOutlined = object;
+        } else if ((object->outline & OUTLINE_TYPE_MASK) != 0 && obj_turn_on_outline(object, &rect) == 0) {
+            // Combat gave this creature an outline and switched it off.
+            tile_refresh_rect(&rect, map_elevation);
+            softOutlined = object;
+            softOutlineBorrowed = true;
         }
     }
 }
