@@ -6,6 +6,7 @@
 #include "game/art.h"
 #include "game/critter.h"
 #include "game/object.h"
+#include "game/scripts.h"
 #include "game/tile.h"
 #include "plib/gnw/rect.h"
 
@@ -213,6 +214,10 @@ static bool free_move_apply(int stepX, int stepY, Rect* dirty)
     if (obj_move_to_tile(obj_dude, neighbors[best].tile, obj_dude->elevation, &moveRect) != 0) {
         return false;
     }
+
+    // Area triggers, traps and the like check each hex the player enters, as
+    // they do when the player walks along a path.
+    scr_chk_spatials_in(obj_dude, neighbors[best].tile, obj_dude->elevation);
 
     // Changing hexes puts the offset back to zero. Restore the position
     // relative to the new hex.
