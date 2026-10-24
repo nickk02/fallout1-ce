@@ -2174,7 +2174,7 @@ void combat_end()
 // Least action points an enemy gets for one turn, and the pause before an
 // enemy first acts, so the player can react.
 #define REALTIME_ENEMY_MIN_AP 3
-#define REALTIME_AI_FIRST_DELAY 450
+#define REALTIME_AI_FIRST_DELAY 200
 // How often the list of fighters is rebuilt. A fight ends when the rebuilt list
 // has no enemy left, so this is also how soon it ends after the last one falls.
 #define REALTIME_SEQUENCE_INTERVAL 1000
