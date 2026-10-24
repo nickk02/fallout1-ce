@@ -38,6 +38,8 @@
 #include "platform_compat.h"
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
+#include "plib/gnw/controller.h"
+#include "plib/gnw/menu_focus.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -213,6 +215,8 @@ static void barter_move_inventory(Object* a1, int quantity, int a3, int a4, Obje
 static void barter_move_from_table_inventory(Object* a1, int quantity, int a3, Object* a4, Object* a5, bool a6);
 static void display_table_inventories(int win, Object* a2, Object* a3, int a4);
 static int do_move_timer(int inventoryWindowType, Object* item, int a3);
+static void inven_controller_equip(int keyCode);
+static void inven_run_action(int actionMenuItem, int keyCode, int inventoryWindowType, Object* item, int itemType, Object** v43, Object* v41, int v56);
 static int setup_move_timer_win(int inventoryWindowType, Object* item);
 static int exit_move_timer_win(int inventoryWindowType);
 
@@ -385,9 +389,78 @@ static int inventry_msg_unload()
 }
 
 // 0x462480
+// Puts the highlighted item where the player would drag it: a weapon into the
+// active hand, armor on the body, ammo into the weapon in the active hand, a
+// drug into use. On an item that is already in a hand or worn, it takes the
+// item off again.
+static void inven_controller_equip(int keyCode)
+{
+    Object* item;
+    Object** slot;
+    int quantity = inven_from_button(keyCode, &item, &slot, NULL);
+    if (quantity == 0 || item == NULL) {
+        return;
+    }
+
+    if (slot != NULL) {
+        // Take it back into the inventory.
+        if (slot == &i_worn) {
+            adjust_ac(stack[0], item, NULL);
+        }
+
+        Object* taken = *slot;
+        *slot = NULL;
+        if (item_add_force(inven_dude, taken, 1) != 0) {
+            *slot = taken;
+        } else if (i_rhand == i_lhand) {
+            i_lhand = NULL;
+            i_rhand = NULL;
+        }
+    } else {
+        int type = item_get_type(item);
+        if (type == ITEM_TYPE_ARMOR) {
+            Object* previous = i_worn;
+            int failed = 0;
+            item_remove_mult(inven_dude, item, 1);
+            if (i_worn != NULL) {
+                i_worn = NULL;
+                failed = item_add_force(inven_dude, previous, 1);
+            }
+
+            if (failed != 0) {
+                i_worn = previous;
+                item_add_force(inven_dude, item, 1);
+            } else {
+                adjust_ac(stack[0], previous, item);
+                i_worn = item;
+            }
+        } else if (type == ITEM_TYPE_DRUG) {
+            if (item_d_take_drug(stack[0], item)) {
+                item_remove_mult(inven_dude, item, 1);
+                obj_connect(item, obj_dude->tile, obj_dude->elevation, NULL);
+                obj_destroy(item);
+            }
+            intface_update_hit_points(true);
+        } else {
+            Object** hand = intface_is_item_right_hand() ? &i_rhand : &i_lhand;
+            int listIndex = keyCode - 1000;
+            if (*hand == NULL || drop_ammo_into_weapon(*hand, item, NULL, quantity, keyCode)) {
+                switch_hand(item, hand, NULL, listIndex);
+            }
+        }
+    }
+
+    adjust_fid();
+    display_stats();
+    display_inventory(stack_offset[curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+}
+
 void handle_inventory()
 {
-    if (isInCombat()) {
+    // In a real-time fight the inventory stops the game and costs nothing.
+    bool realtimeFight = isInCombat() && combat_is_realtime();
+
+    if (isInCombat() && !realtimeFight) {
         if (combat_whose_turn() != inven_dude) {
             return;
         }
@@ -397,7 +470,12 @@ void handle_inventory()
         return;
     }
 
-    if (isInCombat()) {
+    unsigned int freezeStart = 0;
+    if (realtimeFight) {
+        freezeStart = combat_freeze_begin();
+    }
+
+    if (isInCombat() && !realtimeFight) {
         if (inven_dude == obj_dude) {
             int actionPointsRequired = 4 - perk_level(PERK_QUICK_POCKETS);
             if (actionPointsRequired > 0 && actionPointsRequired > obj_dude->data.critter.combat.ap) {
@@ -425,6 +503,7 @@ void handle_inventory()
     display_stats();
     display_inventory(stack_offset[curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
     inven_set_mouse(INVENTORY_WINDOW_CURSOR_HAND);
+    controller_set_inventory_keys(true);
 
     for (;;) {
         sharedFpsLimiter.mark();
@@ -456,6 +535,12 @@ void handle_inventory()
             if (inven_cur_disp + stack_offset[curr_stack] < pud->length) {
                 stack_offset[curr_stack] += 1;
                 display_inventory(stack_offset[curr_stack], -1, INVENTORY_WINDOW_TYPE_NORMAL);
+            }
+        } else if (keyCode == KEY_LOWERCASE_E) {
+            // Controller: the highlighted item is equipped or used.
+            int focusedKey = menu_focus_get_key();
+            if (focusedKey >= 1000 && focusedKey <= 1008) {
+                inven_controller_equip(focusedKey);
             }
         } else if (keyCode == 2500) {
             container_exit(keyCode, INVENTORY_WINDOW_TYPE_NORMAL);
@@ -516,10 +601,15 @@ void handle_inventory()
         }
     }
 
+    controller_set_inventory_keys(false);
     exit_inventory(isoWasEnabled);
 
     // NOTE: Uninline.
     inven_exit();
+
+    if (realtimeFight) {
+        combat_freeze_end(freezeStart);
+    }
 
     if (inven_dude == obj_dude) {
         intface_update_items(false);
@@ -3218,6 +3308,156 @@ void inven_obj_examine_func(Object* critter, Object* item)
     text_font(oldFont);
 }
 
+// Carries out one entry of the item menu: look, use, drop or unload.
+static void inven_run_action(int actionMenuItem, int keyCode, int inventoryWindowType, Object* item, int itemType, Object** v43, Object* v41, int v56)
+{
+    switch (actionMenuItem) {
+    case GAME_MOUSE_ACTION_MENU_ITEM_DROP:
+        if (v43 != NULL) {
+            if (v43 == &i_worn) {
+                adjust_ac(stack[0], item, NULL);
+            }
+            item_add_force(v41, item, 1);
+            v56 = 1;
+            *v43 = NULL;
+        }
+
+        if (item->pid == PROTO_ID_MONEY) {
+            if (v56 > 1) {
+                v56 = do_move_timer(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, v56);
+            } else {
+                v56 = 1;
+            }
+
+            if (v56 > 0) {
+                if (v56 == 1) {
+                    item_caps_set_amount(item, 1);
+                    obj_drop(v41, item);
+                } else {
+                    if (item_remove_mult(v41, item, v56 - 1) == 0) {
+                        Object* a2;
+                        if (inven_from_button(keyCode, &a2, &v43, &v41) != 0) {
+                            item_caps_set_amount(a2, v56);
+                            obj_drop(v41, a2);
+                        } else {
+                            item_add_force(v41, item, v56 - 1);
+                        }
+                    }
+                }
+            }
+        } else if (item->pid == PROTO_ID_DYNAMITE_II || item->pid == PROTO_ID_PLASTIC_EXPLOSIVES_II) {
+            dropped_explosive = 1;
+            obj_drop(v41, item);
+        } else {
+            if (v56 > 1) {
+                v56 = do_move_timer(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, v56);
+
+                for (int index = 0; index < v56; index++) {
+                    if (inven_from_button(keyCode, &item, &v43, &v41) != 0) {
+                        obj_drop(v41, item);
+                    }
+                }
+            } else {
+                obj_drop(v41, item);
+            }
+        }
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_LOOK:
+        if (inventoryWindowType != INVENTORY_WINDOW_TYPE_NORMAL) {
+            obj_examine_func(stack[0], item, display_msg);
+        } else {
+            inven_obj_examine_func(stack[0], item);
+        }
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_USE:
+        switch (itemType) {
+        case ITEM_TYPE_CONTAINER:
+            container_enter(keyCode, inventoryWindowType);
+            break;
+        case ITEM_TYPE_DRUG:
+            if (item_d_take_drug(stack[0], item)) {
+                if (v43 != NULL) {
+                    *v43 = NULL;
+                } else {
+                    item_remove_mult(v41, item, 1);
+                }
+
+                obj_connect(item, obj_dude->tile, obj_dude->elevation, NULL);
+                obj_destroy(item);
+            }
+            intface_update_hit_points(true);
+            break;
+        case ITEM_TYPE_WEAPON:
+        case ITEM_TYPE_MISC:
+            if (v43 == NULL) {
+                item_remove_mult(v41, item, 1);
+            }
+
+            int v21;
+            if (proto_action_can_use(item->pid)) {
+                v21 = protinst_use_item(stack[0], item);
+            } else {
+                v21 = protinst_use_item_on(stack[0], stack[0], item);
+            }
+
+            if (v21 == 1) {
+                if (v43 != NULL) {
+                    *v43 = NULL;
+                }
+
+                obj_connect(item, obj_dude->tile, obj_dude->elevation, NULL);
+                obj_destroy(item);
+            } else {
+                if (v43 == NULL) {
+                    item_add_force(v41, item, 1);
+                }
+            }
+        }
+        break;
+    case GAME_MOUSE_ACTION_MENU_ITEM_UNLOAD:
+        if (v43 == NULL) {
+            item_remove_mult(v41, item, 1);
+        }
+
+        for (;;) {
+            Object* ammo = item_w_unload(item);
+            if (ammo == NULL) {
+                break;
+            }
+
+            Rect rect;
+            obj_disconnect(ammo, &rect);
+            item_add_force(v41, ammo, 1);
+        }
+
+        if (v43 == NULL) {
+            item_add_force(v41, item, 1);
+        }
+        break;
+    default:
+        break;
+    }
+
+    inven_set_mouse(INVENTORY_WINDOW_CURSOR_ARROW);
+
+    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_NORMAL && actionMenuItem != GAME_MOUSE_ACTION_MENU_ITEM_LOOK) {
+        display_stats();
+    }
+
+    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_LOOT
+        || inventoryWindowType == INVENTORY_WINDOW_TYPE_TRADE) {
+        display_target_inventory(target_stack_offset[target_curr_stack], -1, target_pud, inventoryWindowType);
+    }
+
+    display_inventory(stack_offset[curr_stack], -1, inventoryWindowType);
+
+    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_TRADE) {
+        display_table_inventories(barter_back_win, ptable, btable, -1);
+    }
+
+    adjust_fid();
+}
+
 // 0x46629C
 void inven_action_cursor(int keyCode, int inventoryWindowType)
 {
@@ -3456,151 +3696,7 @@ void inven_action_cursor(int keyCode, int inventoryWindowType)
     display_inventory(stack_offset[curr_stack], -1, inventoryWindowType);
 
     int actionMenuItem = actionMenuItems[menuItemIndex];
-    switch (actionMenuItem) {
-    case GAME_MOUSE_ACTION_MENU_ITEM_DROP:
-        if (v43 != NULL) {
-            if (v43 == &i_worn) {
-                adjust_ac(stack[0], item, NULL);
-            }
-            item_add_force(v41, item, 1);
-            v56 = 1;
-            *v43 = NULL;
-        }
-
-        if (item->pid == PROTO_ID_MONEY) {
-            if (v56 > 1) {
-                v56 = do_move_timer(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, v56);
-            } else {
-                v56 = 1;
-            }
-
-            if (v56 > 0) {
-                if (v56 == 1) {
-                    item_caps_set_amount(item, 1);
-                    obj_drop(v41, item);
-                } else {
-                    if (item_remove_mult(v41, item, v56 - 1) == 0) {
-                        Object* a2;
-                        if (inven_from_button(keyCode, &a2, &v43, &v41) != 0) {
-                            item_caps_set_amount(a2, v56);
-                            obj_drop(v41, a2);
-                        } else {
-                            item_add_force(v41, item, v56 - 1);
-                        }
-                    }
-                }
-            }
-        } else if (item->pid == PROTO_ID_DYNAMITE_II || item->pid == PROTO_ID_PLASTIC_EXPLOSIVES_II) {
-            dropped_explosive = 1;
-            obj_drop(v41, item);
-        } else {
-            if (v56 > 1) {
-                v56 = do_move_timer(INVENTORY_WINDOW_TYPE_MOVE_ITEMS, item, v56);
-
-                for (int index = 0; index < v56; index++) {
-                    if (inven_from_button(keyCode, &item, &v43, &v41) != 0) {
-                        obj_drop(v41, item);
-                    }
-                }
-            } else {
-                obj_drop(v41, item);
-            }
-        }
-        break;
-    case GAME_MOUSE_ACTION_MENU_ITEM_LOOK:
-        if (inventoryWindowType != INVENTORY_WINDOW_TYPE_NORMAL) {
-            obj_examine_func(stack[0], item, display_msg);
-        } else {
-            inven_obj_examine_func(stack[0], item);
-        }
-        break;
-    case GAME_MOUSE_ACTION_MENU_ITEM_USE:
-        switch (itemType) {
-        case ITEM_TYPE_CONTAINER:
-            container_enter(keyCode, inventoryWindowType);
-            break;
-        case ITEM_TYPE_DRUG:
-            if (item_d_take_drug(stack[0], item)) {
-                if (v43 != NULL) {
-                    *v43 = NULL;
-                } else {
-                    item_remove_mult(v41, item, 1);
-                }
-
-                obj_connect(item, obj_dude->tile, obj_dude->elevation, NULL);
-                obj_destroy(item);
-            }
-            intface_update_hit_points(true);
-            break;
-        case ITEM_TYPE_WEAPON:
-        case ITEM_TYPE_MISC:
-            if (v43 == NULL) {
-                item_remove_mult(v41, item, 1);
-            }
-
-            int v21;
-            if (proto_action_can_use(item->pid)) {
-                v21 = protinst_use_item(stack[0], item);
-            } else {
-                v21 = protinst_use_item_on(stack[0], stack[0], item);
-            }
-
-            if (v21 == 1) {
-                if (v43 != NULL) {
-                    *v43 = NULL;
-                }
-
-                obj_connect(item, obj_dude->tile, obj_dude->elevation, NULL);
-                obj_destroy(item);
-            } else {
-                if (v43 == NULL) {
-                    item_add_force(v41, item, 1);
-                }
-            }
-        }
-        break;
-    case GAME_MOUSE_ACTION_MENU_ITEM_UNLOAD:
-        if (v43 == NULL) {
-            item_remove_mult(v41, item, 1);
-        }
-
-        for (;;) {
-            Object* ammo = item_w_unload(item);
-            if (ammo == NULL) {
-                break;
-            }
-
-            Rect rect;
-            obj_disconnect(ammo, &rect);
-            item_add_force(v41, ammo, 1);
-        }
-
-        if (v43 == NULL) {
-            item_add_force(v41, item, 1);
-        }
-        break;
-    default:
-        break;
-    }
-
-    inven_set_mouse(INVENTORY_WINDOW_CURSOR_ARROW);
-
-    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_NORMAL && actionMenuItem != GAME_MOUSE_ACTION_MENU_ITEM_LOOK) {
-        display_stats();
-    }
-
-    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_LOOT
-        || inventoryWindowType == INVENTORY_WINDOW_TYPE_TRADE) {
-        display_target_inventory(target_stack_offset[target_curr_stack], -1, target_pud, inventoryWindowType);
-    }
-
-    display_inventory(stack_offset[curr_stack], -1, inventoryWindowType);
-
-    if (inventoryWindowType == INVENTORY_WINDOW_TYPE_TRADE) {
-        display_table_inventories(barter_back_win, ptable, btable, -1);
-    }
-
-    adjust_fid();
+    inven_run_action(actionMenuItem, keyCode, inventoryWindowType, item, itemType, v43, v41, v56);
 }
 
 // 0x466B10

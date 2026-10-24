@@ -1559,7 +1559,11 @@ void intface_end_window_open(bool animated)
     }
 
     int frameCount = art_frame_max_frame(art);
-    gsound_play_sfx_file("iciboxx1");
+    // Real-time fights show the panel without the sound, which would play at
+    // every fight start.
+    if (animated) {
+        gsound_play_sfx_file("iciboxx1");
+    }
 
     if (animated) {
         unsigned int delay = 1000 / art_frame_fps(art);
@@ -1617,7 +1621,9 @@ void intface_end_window_close(bool animated)
 
     intface_destroy_end_turn_button();
     intface_destroy_end_combat_button();
-    gsound_play_sfx_file("icibcxx1");
+    if (animated) {
+        gsound_play_sfx_file("icibcxx1");
+    }
 
     if (animated) {
         unsigned int delay = 1000 / art_frame_fps(art);
@@ -1669,7 +1675,11 @@ void intface_end_buttons_enable()
             return;
         }
 
-        gsound_play_sfx_file("icombat2");
+        // Real-time fights switch these lights after every enemy action, so
+        // they stay quiet.
+        if (!combat_is_realtime()) {
+            gsound_play_sfx_file("icombat2");
+        }
         trans_buf_to_buf(lightsFrmData, 57, 58, 57, interfaceBuffer + 38 * 640 + 580, 640);
         win_draw_rect(interfaceWindow, &endWindowRect);
 
@@ -1692,7 +1702,9 @@ void intface_end_buttons_disable()
             return;
         }
 
-        gsound_play_sfx_file("icombat1");
+        if (!combat_is_realtime()) {
+            gsound_play_sfx_file("icombat1");
+        }
         trans_buf_to_buf(lightsFrmData, 57, 58, 57, interfaceBuffer + 38 * 640 + 580, 640);
         win_draw_rect(interfaceWindow, &endWindowRect);
 
@@ -2163,6 +2175,40 @@ static void intface_draw_ammo_lights(int x, int ratio)
         rect.lry = 26 + 70;
         win_draw_rect(interfaceWindow, &rect);
     }
+}
+
+void intface_select_item(int hand)
+{
+    if (interfaceWindow == -1 || itemCurrentItem == hand) {
+        return;
+    }
+
+    gsound_play_sfx_file("ib1p1xx1");
+    intface_toggle_items(true);
+}
+
+bool intface_reload_active()
+{
+    if (interfaceWindow == -1) {
+        return false;
+    }
+
+    InterfaceItemState* state = &(itemButtonItems[itemCurrentItem]);
+    if (!state->isWeapon || state->item == NULL) {
+        return false;
+    }
+
+    if (item_w_max_ammo(state->item) == item_w_curr_ammo(state->item)) {
+        display_print("The weapon is full.");
+        return false;
+    }
+
+    if (intface_item_reload() != 0) {
+        display_print("You have no ammo for it.");
+        return false;
+    }
+
+    return true;
 }
 
 // 0x4560E4

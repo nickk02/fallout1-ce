@@ -8,6 +8,7 @@
 #include "game/art.h"
 #include "game/combat.h"
 #include "game/critter.h"
+#include "game/free_move.h"
 #include "game/game.h"
 #include "game/gconfig.h"
 #include "game/gsound.h"
@@ -925,29 +926,20 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
             soft_target_select(NULL);
 
-            int actionPoints;
-            if (isInCombat()) {
-                actionPoints = combat_free_move + obj_dude->data.critter.combat.ap;
-            } else {
-                actionPoints = -1;
-            }
-
             bool running;
             configGetBool(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_RUNNING_KEY, &running);
 
+            // Shift swaps between walking and running.
             if (keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT]) {
-                if (running) {
-                    dude_move(actionPoints);
-                    return;
-                }
-            } else {
-                if (!running) {
-                    dude_move(actionPoints);
-                    return;
-                }
+                running = !running;
             }
 
-            dude_run(actionPoints);
+            // The player walks to the spot the way the keys move them, in a fight
+            // too, so the two never look different.
+            int tile = tile_num(mouseX, mouseY, map_elevation);
+            if (tile != -1 && !game_ui_is_disabled()) {
+                free_move_goto(tile, running);
+            }
             return;
         }
 

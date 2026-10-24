@@ -61,6 +61,19 @@ void combat_delete_critter(Object* obj);
 // `true` while fights run in real time instead of in turns.
 bool combat_is_realtime();
 
+// Switches between real-time fights and the original turn-based ones. Set once
+// at start from `REALTIME_COMBAT` in f1_res.ini, so regression checks can run
+// the classic rules.
+void combat_set_realtime(bool enabled);
+
+// Action points come back over time. The combat pause spends them.
+void combat_vats_update();
+void combat_vats_pause();
+
+// Real-time fights stop while a full screen such as the inventory is open.
+unsigned int combat_freeze_begin();
+void combat_freeze_end(unsigned int start);
+
 static inline bool isInCombat()
 {
     return (combat_state & COMBAT_STATE_0x01) != 0;

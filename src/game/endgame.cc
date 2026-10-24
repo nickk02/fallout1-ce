@@ -184,6 +184,8 @@ static int gEndgameEndingOverlay;
 // 0x438670
 void endgame_slideshow()
 {
+    svga_set_menu_zoom(true);
+
     int fid;
     int v1;
 
@@ -288,6 +290,8 @@ void endgame_slideshow()
     }
 
     game_set_global_var(GVAR_CALM_REBELS_2, 0);
+
+    svga_set_menu_zoom(false);
 }
 
 // 0x438A4C

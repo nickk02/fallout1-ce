@@ -17,28 +17,17 @@
 
 namespace fallout {
 
-// Speed in screen pixels per second. A hex is 32 pixels wide.
-#define FREE_MOVE_WALK_SPEED 64.0f
-#define FREE_MOVE_RUN_SPEED 150.0f
-
-// Limits for the speed taken from the art.
-#define FREE_MOVE_MIN_SPEED 40.0f
-#define FREE_MOVE_MAX_SPEED 220.0f
-
+// Slowest the walk cycle plays, as a share of its normal rate, so a light
+// push on the stick still shows steps.
+#define FREE_MOVE_MIN_RATE 0.35f
 
 static bool active = false;
 static bool wasRunning = false;
 static float remainderX = 0.0f;
 static float remainderY = 0.0f;
-static float frameDistance = 0.0f;
 
-// Pixels of travel that one frame of the current walk or run cycle covers. It
-// comes from the art, so the feet keep up with the ground at any speed.
-static float pixelsPerFrame = 5.0f;
-
-// Ground speed at which the current cycle plays at its normal frame rate. The
-// player moves at this speed, so the feet never outrun or lag the ground.
-static float poseSpeed = 0.0f;
+// Frames of the walk or run cycle that are due but not yet shown.
+static float frameClock = 0.0f;
 
 // A closed door the player is pushing against, and when the player last asked
 // to open one.
@@ -95,7 +84,7 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
         active = true;
         remainderX = 0.0f;
         remainderY = 0.0f;
-        frameDistance = 0.0f;
+        frameClock = 0.0f;
         wasRunning = !running;
     }
 
@@ -119,21 +108,64 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
         pc_flag_off(PC_FLAG_SNEAKING);
     }
 
-    float speed = poseSpeed > 0.0f ? poseSpeed : (running ? FREE_MOVE_RUN_SPEED : FREE_MOVE_WALK_SPEED);
-    if (speed < FREE_MOVE_MIN_SPEED) {
-        speed = FREE_MOVE_MIN_SPEED;
-    } else if (speed > FREE_MOVE_MAX_SPEED) {
-        speed = FREE_MOVE_MAX_SPEED;
+    float magnitude = sqrtf(dirX * dirX + dirY * dirY);
+    if (magnitude <= 0.0f) {
+        return true;
     }
-    remainderX += dirX * speed * elapsed;
-    remainderY += dirY * speed * elapsed;
 
-    int stepX = (int)remainderX;
-    int stepY = (int)remainderY;
-    remainderX -= stepX;
-    remainderY -= stepY;
+    float headingX = dirX / magnitude;
+    float headingY = dirY / magnitude;
 
-    if (stepX != 0 || stepY != 0) {
+    // The cycle plays at the rate its art was drawn for, and each frame moves
+    // the player by the distance that frame was drawn with, as in the original
+    // animations. The feet then stay on the ground. A light push on the stick
+    // plays the cycle more slowly.
+    float rate = running ? 1.0f : (magnitude < FREE_MOVE_MIN_RATE ? FREE_MOVE_MIN_RATE : (magnitude > 1.0f ? 1.0f : magnitude));
+
+    CacheEntry* artHandle;
+    Art* art = art_ptr_lock(obj_dude->fid, &artHandle);
+    if (art == nullptr) {
+        return true;
+    }
+
+    int fps = art_frame_fps(art);
+    if (fps <= 0) {
+        fps = 10;
+    }
+
+    frameClock += elapsed * fps * rate;
+    int frames = (int)frameClock;
+    frameClock -= frames;
+
+    // After a long stall, do not run ahead to catch up.
+    if (frames > 3) {
+        frames = 3;
+    }
+
+    for (int index = 0; index < frames; index++) {
+        if (obj_inc_frame(obj_dude, &part) == 0) {
+            dirty_add(&dirty, &part);
+        }
+
+        int hotX;
+        int hotY;
+        if (art_frame_hot(art, obj_dude->frame, obj_dude->rotation, &hotX, &hotY) != 0) {
+            continue;
+        }
+
+        float distance = sqrtf((float)(hotX * hotX + hotY * hotY));
+        remainderX += headingX * distance;
+        remainderY += headingY * distance;
+
+        int stepX = (int)remainderX;
+        int stepY = (int)remainderY;
+        remainderX -= stepX;
+        remainderY -= stepY;
+
+        if (stepX == 0 && stepY == 0) {
+            continue;
+        }
+
         // If the full step is blocked, slide along the obstacle.
         bool moved = free_move_apply(stepX, stepY, &part)
             || (stepX != 0 && free_move_apply(stepX, 0, &part))
@@ -146,6 +178,7 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
                 lastDoorAttempt = now;
                 Object* door = blockedDoor;
                 blockedDoor = nullptr;
+                art_ptr_unlock(artHandle);
                 free_move_stop();
                 action_use_an_object(obj_dude, door);
                 return true;
@@ -156,16 +189,10 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
 
         if (moved) {
             dirty_add(&dirty, &part);
-
-            frameDistance += sqrtf((float)(stepX * stepX + stepY * stepY));
-            while (frameDistance >= pixelsPerFrame) {
-                frameDistance -= pixelsPerFrame;
-                if (obj_inc_frame(obj_dude, &part) == 0) {
-                    dirty_add(&dirty, &part);
-                }
-            }
         }
     }
+
+    art_ptr_unlock(artHandle);
 
     if (dirty.valid) {
         tile_refresh_rect(&(dirty.rect), obj_dude->elevation);
@@ -174,8 +201,74 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
     return true;
 }
 
+// The tile of a click-to-move walk and how it is going.
+static int gotoTile = -1;
+static bool gotoRunning = false;
+static float gotoBest = 0.0f;
+static unsigned int gotoBestAt = 0;
+
+void free_move_goto(int tile, bool running)
+{
+    gotoTile = tile;
+    gotoRunning = running;
+    gotoBest = 1e9f;
+    gotoBestAt = get_time();
+}
+
+bool free_move_goto_active()
+{
+    return gotoTile != -1;
+}
+
+void free_move_goto_cancel()
+{
+    gotoTile = -1;
+}
+
+bool free_move_goto_step(float elapsed)
+{
+    if (gotoTile == -1) {
+        return false;
+    }
+
+    int originX;
+    int originY;
+    int targetX;
+    int targetY;
+    if (tile_coord(obj_dude->tile, &originX, &originY, obj_dude->elevation) == -1
+        || tile_coord(gotoTile, &targetX, &targetY, obj_dude->elevation) == -1) {
+        free_move_stop();
+        return false;
+    }
+
+    float dx = (float)(targetX - (originX + obj_dude->x));
+    float dy = (float)(targetY - (originY + obj_dude->y));
+    float distance = sqrtf(dx * dx + dy * dy);
+
+    // Arrived.
+    if (distance < 6.0f) {
+        free_move_stop();
+        return false;
+    }
+
+    // Give up when the way is blocked and no progress is made.
+    unsigned int now = get_time();
+    if (distance < gotoBest - 2.0f) {
+        gotoBest = distance;
+        gotoBestAt = now;
+    } else if (now - gotoBestAt > 700) {
+        free_move_stop();
+        return false;
+    }
+
+    free_move_step(dx / distance, dy / distance, gotoRunning, elapsed);
+    return true;
+}
+
 void free_move_stop()
 {
+    gotoTile = -1;
+
     if (!active) {
         return;
     }
@@ -329,9 +422,22 @@ static bool free_move_face(float dirX, float dirY, Rect* dirty)
     return true;
 }
 
-// Switches to the walking or running pictures.
+// Switches to the walking or running pictures. The cycle carries on from the
+// same point, so changing speed does not restart the stride.
 static bool free_move_set_pose(bool running, Rect* dirty)
 {
+    int oldAnim = FID_ANIM_TYPE(obj_dude->fid);
+    int oldFrame = obj_dude->frame;
+    int oldCount = 0;
+    if (oldAnim == ANIM_WALK || oldAnim == ANIM_RUNNING) {
+        CacheEntry* oldHandle;
+        Art* oldArt = art_ptr_lock(obj_dude->fid, &oldHandle);
+        if (oldArt != nullptr) {
+            oldCount = art_frame_max_frame(oldArt);
+            art_ptr_unlock(oldHandle);
+        }
+    }
+
     int anim = running ? ANIM_RUNNING : ANIM_WALK;
     int fid = art_id(FID_TYPE(obj_dude->fid), obj_dude->fid & 0xFFF, anim, (obj_dude->fid & 0xF000) >> 12, obj_dude->rotation + 1);
     if (!art_exists(fid)) {
@@ -342,35 +448,18 @@ static bool free_move_set_pose(bool running, Rect* dirty)
         return false;
     }
 
-    pixelsPerFrame = 5.0f;
-    poseSpeed = 0.0f;
-    CacheEntry* artHandle;
-    Art* art = art_ptr_lock(fid, &artHandle);
-    if (art != nullptr) {
-        int frameCount = art_frame_max_frame(art);
-        float travelX = 0.0f;
-        float travelY = 0.0f;
-        for (int frame = 0; frame < frameCount; frame++) {
-            int x;
-            int y;
-            if (art_frame_hot(art, frame, obj_dude->rotation, &x, &y) == 0) {
-                travelX += (float)x;
-                travelY += (float)y;
-            }
+    int frame = 0;
+    if (oldCount > 0) {
+        CacheEntry* handle;
+        Art* art = art_ptr_lock(fid, &handle);
+        if (art != nullptr) {
+            frame = oldFrame * art_frame_max_frame(art) / oldCount;
+            art_ptr_unlock(handle);
         }
-        art_ptr_unlock(artHandle);
-
-        float travel = sqrtf(travelX * travelX + travelY * travelY);
-        if (frameCount > 0 && travel > 1.0f) {
-            pixelsPerFrame = travel / frameCount;
-        }
-
-        int fps = art_frame_fps(art);
-        poseSpeed = fps > 0 ? pixelsPerFrame * (float)fps : 0.0f;
     }
 
     Rect frameRect;
-    if (obj_set_frame(obj_dude, 0, &frameRect) == 0) {
+    if (obj_set_frame(obj_dude, frame, &frameRect) == 0) {
         rect_min_bound(dirty, &frameRect, dirty);
     }
 

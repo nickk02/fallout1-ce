@@ -13,6 +13,10 @@ void menu_focus_move(int dx, int dy);
 // controller has moved the focus once.
 void menu_focus_update();
 
+// The event code that clicking the focused button gives, or -1 when no button
+// has the focus. Screens use it to know which of their items is highlighted.
+int menu_focus_get_key();
+
 // `true` once the controller has taken over navigation.
 bool menu_focus_is_active();
 

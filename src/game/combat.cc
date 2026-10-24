@@ -66,6 +66,7 @@ static void combat_sequence();
 static int combat_input();
 static int combat_turn(Object* a1, bool a2);
 static bool combat_should_end();
+static void combat_realtime_forget();
 static bool check_ranged_miss(Attack* attack);
 static int shoot_along_path(Attack* attack, int a2, int a3, int anim);
 static int compute_spray(Attack* attack, int accuracy, int* roundsHitMainTargetPtr, int* roundsSpentPtr, int anim);
@@ -105,6 +106,11 @@ static bool combat_realtime = true;
 bool combat_is_realtime()
 {
     return combat_realtime;
+}
+
+void combat_set_realtime(bool enabled)
+{
+    combat_realtime = enabled;
 }
 
 // 0x4FEC88
@@ -1608,6 +1614,8 @@ void combat_reset()
     obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
     combat_free_move = 0;
     combat_ending_guy = NULL;
+
+    combat_realtime_forget();
 }
 
 // 0x41F950
@@ -1712,6 +1720,14 @@ int combat_save(DB_FILE* stream)
 {
     int index;
 
+    // A real-time fight has no turn order to keep. The save records no fight, so
+    // the game loads with the player free to move, and the creatures start the
+    // fight again when they notice the player.
+    if (combat_realtime) {
+        if (db_fwriteUInt32(stream, combat_state & ~COMBAT_STATE_0x01) == -1) return -1;
+        return 0;
+    }
+
     if (db_fwriteUInt32(stream, combat_state) == -1) return -1;
 
     if (!isInCombat()) return 0;
@@ -1778,12 +1794,16 @@ static void combat_begin(Object* a1)
 
         tile_refresh_display();
         game_ui_disable(0);
-        gmouse_set_cursor(MOUSE_CURSOR_WAIT_WATCH);
+        if (!combat_realtime) {
+            gmouse_set_cursor(MOUSE_CURSOR_WAIT_WATCH);
+        }
         combat_ending_guy = NULL;
         combat_begin_extra(a1);
-        // The end turn panel slides in and out in about half a second, which stalls
-        // real-time play.
-        intface_end_window_open(!combat_realtime);
+        // Real-time fights do not show the end turn panel, which also took half a
+        // second to slide in. Nothing on screen says a fight started.
+        if (!combat_realtime) {
+            intface_end_window_open(true);
+        }
         gmouse_enable_scrolling();
     }
 }
@@ -1848,9 +1868,7 @@ static void combat_over()
     // play, so they jump instead.
     intface_update_items(!combat_realtime);
 
-    obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
-
-    intface_update_move_points(0, 0);
+    intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
 
     if (game_user_wants_to_quit == 0) {
         combat_give_exps(combat_exps);
@@ -2155,14 +2173,22 @@ void combat_end()
 // timer while the player moves and attacks at any moment. Action points refill
 // over time. Creatures still decide through the original AI, one at a time, and
 // the player's input keeps running while they act.
-#define REALTIME_AI_INTERVAL 1600
-#define REALTIME_AP_INTERVAL 200
+// Pause between the end of a creature's action and its next one, and the least
+// time the player gets between two enemy actions. An enemy action takes more than
+// a second, and the player's attacks wait for it, so a short gap would leave
+// the player no room to act.
+#define REALTIME_AI_INTERVAL 2600
+#define REALTIME_PLAYER_WINDOW 900
+// Action points are the pause's resource. Attacks and movement do not use them.
+#define REALTIME_AP_INTERVAL 400
 
 // Least action points an enemy gets for one turn, and the pause before an
 // enemy first acts, so the player can react.
 #define REALTIME_ENEMY_MIN_AP 3
-#define REALTIME_AI_FIRST_DELAY 900
-#define REALTIME_SEQUENCE_INTERVAL 5000
+#define REALTIME_AI_FIRST_DELAY 200
+// How often the list of fighters is rebuilt. A fight ends when the rebuilt list
+// has no enemy left, so this is also how soon it ends after the last one falls.
+#define REALTIME_SEQUENCE_INTERVAL 1000
 
 static bool combat_realtime_active = false;
 static bool combat_realtime_pumping = false;
@@ -2170,8 +2196,15 @@ static Object* combat_realtime_queued_attack = NULL;
 static unsigned int combat_realtime_queued_at = 0;
 
 // How long a buffered attack waits for action points or a free attack state.
-#define REALTIME_ATTACK_BUFFER 1500
+#define REALTIME_ATTACK_BUFFER 2500
 static unsigned int combat_realtime_ap_tick = 0;
+static unsigned int combat_realtime_enemy_done = 0;
+
+// When the player last had a reason to fight: an enemy that sees the player, an
+// enemy acting, or the player attacking. A fight with none of those for a while
+// ends by itself.
+static unsigned int combat_realtime_last_threat = 0;
+#define REALTIME_IDLE_END 8000
 static std::unordered_map<Object*, unsigned int> combat_realtime_next_turn;
 
 static void combat_attack_this_now(Object* a1);
@@ -2190,8 +2223,39 @@ typedef struct QueuedShot {
 } QueuedShot;
 
 static bool combat_paused = false;
+
+// `true` while a shot lined up in the pause goes out. Only those shots cost the
+// player action points.
+static bool combat_vats_firing = false;
 static std::vector<QueuedShot> combat_pause_building;
 static std::vector<QueuedShot> combat_pause_running;
+
+// Time did not pass while the game was stopped, so nothing may be late because
+// of it.
+static void combat_shift_timers(unsigned int delta)
+{
+    for (auto& entry : combat_realtime_next_turn) {
+        entry.second += delta;
+    }
+    combat_realtime_ap_tick += delta;
+    combat_realtime_queued_at += delta;
+    combat_realtime_last_threat += delta;
+    damage_popup_delay_all(delta);
+}
+
+// Stops the game for a screen that opens in the middle of a fight, such as the
+// inventory. Returns the time to hand back to `combat_freeze_end`.
+unsigned int combat_freeze_begin()
+{
+    anim_set_paused(true);
+    return get_time();
+}
+
+void combat_freeze_end(unsigned int start)
+{
+    anim_set_paused(false);
+    combat_shift_timers(get_time() - start);
+}
 
 // Stops time. Every animation freezes, no creature acts, and no action points
 // come back. The player aims shots at enemies, choosing a body part for each.
@@ -2199,7 +2263,7 @@ static std::vector<QueuedShot> combat_pause_running;
 // frozen until the last one is done.
 static void combat_realtime_pause()
 {
-    if (combat_paused || !combat_realtime_active) {
+    if (combat_paused) {
         return;
     }
 
@@ -2235,14 +2299,7 @@ static void combat_realtime_pause()
     combat_paused = false;
     gsound_play_sfx_file("icombat2");
 
-    // Time did not pass, so nothing may be late because of the pause.
-    unsigned int delta = get_time() - start;
-    for (auto& entry : combat_realtime_next_turn) {
-        entry.second += delta;
-    }
-    combat_realtime_ap_tick += delta;
-    combat_realtime_queued_at += delta;
-    damage_popup_delay_all(delta);
+    combat_shift_timers(get_time() - start);
 
     combat_pause_running = combat_pause_building;
     combat_pause_building.clear();
@@ -2262,15 +2319,27 @@ static void combat_pause_enqueue(Object* target)
         return;
     }
 
+    // A shot that costs more than the whole bar still has to be possible, so no
+    // cost goes above the most action points the player can have.
+    int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+
     int used = 0;
     for (const QueuedShot& shot : combat_pause_building) {
-        used += item_w_mp_cost(obj_dude, shot.hitMode, true);
+        int shotCost = item_w_mp_cost(obj_dude, shot.hitMode, true);
+        used += shotCost < maxAp ? shotCost : maxAp;
     }
 
     int cost = item_w_mp_cost(obj_dude, hitMode, true);
+    if (cost > maxAp) {
+        cost = maxAp;
+    }
+
     char message[128];
     if (used + cost > obj_dude->data.critter.combat.ap) {
-        snprintf(message, sizeof(message), "Not enough action points for another shot.");
+        snprintf(message, sizeof(message), "Not enough action points: this shot needs %d, you have %d of %d. Time is stopped, so they do not come back until you resume.",
+            used + cost,
+            obj_dude->data.critter.combat.ap,
+            maxAp);
         display_print(message);
         return;
     }
@@ -2306,7 +2375,9 @@ static void combat_pause_fire_next()
     }
 
     char message[96];
+    combat_vats_firing = true;
     if (combat_check_bad_shot(obj_dude, shot.target, shot.hitMode, true) != COMBAT_BAD_SHOT_OK) {
+        combat_vats_firing = false;
         snprintf(message, sizeof(message), "A queued shot could not be taken.");
         display_print(message);
         return;
@@ -2320,6 +2391,64 @@ static void combat_pause_fire_next()
     }
 
     combat_attack(obj_dude, shot.target, shot.hitMode, shot.hitLocation);
+    combat_vats_firing = false;
+}
+
+// Gives action points back over time and, outside a fight, starts the fight when
+// the pause left shots lined up. Called every frame.
+void combat_vats_update()
+{
+    if (combat_paused) {
+        return;
+    }
+
+    unsigned int now = get_time();
+    if (now - combat_realtime_ap_tick >= REALTIME_AP_INTERVAL) {
+        combat_realtime_ap_tick = now;
+
+        int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+        if (obj_dude->data.critter.combat.ap < maxAp) {
+            obj_dude->data.critter.combat.ap += 1;
+            intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
+        }
+    }
+
+    if (!isInCombat() && !combat_pause_running.empty()) {
+        Object* target = combat_pause_running.front().target;
+        if (target == NULL || critter_is_dead(target)) {
+            combat_pause_running.erase(combat_pause_running.begin());
+            return;
+        }
+
+        STRUCT_664980 stru;
+        stru.attacker = obj_dude;
+        stru.defender = target;
+        stru.actionPointsBonus = 0;
+        stru.accuracyBonus = 0;
+        stru.damageBonus = 0;
+        stru.minDamage = 0;
+        stru.maxDamage = INT_MAX;
+        stru.field_1C = 0;
+        combat(&stru);
+    }
+}
+
+// Nothing queued for a fight may outlive the map it was queued on: the
+// creatures it points to are gone.
+static void combat_realtime_forget()
+{
+    combat_realtime_queued_attack = NULL;
+    combat_pause_building.clear();
+    combat_pause_running.clear();
+    combat_realtime_next_turn.clear();
+    combat_paused = false;
+    combat_vats_firing = false;
+}
+
+// Stops time, in a fight or out of one.
+void combat_vats_pause()
+{
+    combat_realtime_pause();
 }
 
 // Runs the player's side of the fight: movement, actions, and action point
@@ -2333,15 +2462,7 @@ static int combat_realtime_pump()
     combat_realtime_pumping = true;
 
     unsigned int now = get_time();
-    if (now - combat_realtime_ap_tick >= REALTIME_AP_INTERVAL) {
-        combat_realtime_ap_tick = now;
-
-        int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
-        if (obj_dude->data.critter.combat.ap < maxAp) {
-            obj_dude->data.critter.combat.ap += 1;
-            intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
-        }
-    }
+    combat_vats_update();
 
     // Nothing in real-time combat may leave the interface locked.
     if (game_ui_is_disabled()) {
@@ -2378,6 +2499,7 @@ static int combat_realtime_pump()
 static void combat_realtime_loop()
 {
     combat_realtime_active = true;
+    combat_realtime_last_threat = get_time();
     combat_realtime_next_turn.clear();
     combat_realtime_queued_attack = NULL;
 
@@ -2392,7 +2514,6 @@ static void combat_realtime_loop()
         combat_outline_on();
     }
 
-    obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
     intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
     intface_update_ac(false);
 
@@ -2404,7 +2525,11 @@ static void combat_realtime_loop()
     if (gcsd != NULL) {
         Object* defender = gcsd->defender;
         gcsd = NULL;
-        combat_attack_this_now(defender);
+
+        // A fight that starts from the pause fires the lined up shots instead.
+        if (combat_pause_running.empty()) {
+            combat_attack_this_now(defender);
+        }
     }
 
     while (!combat_should_end()) {
@@ -2436,10 +2561,30 @@ static void combat_realtime_loop()
 
         // Creatures act one at a time, each on its own timer. They wait while the
         // shots lined up in the pause go out.
-        if (combat_turn_running == 0 && combat_pause_running.empty()) {
+        if (combat_turn_running == 0 && combat_pause_running.empty() && combat_realtime_queued_attack == NULL
+            && get_time() - combat_realtime_enemy_done >= REALTIME_PLAYER_WINDOW) {
             if (now - lastSequence >= REALTIME_SEQUENCE_INTERVAL) {
                 lastSequence = now;
                 combat_sequence();
+
+                // Any enemy that still perceives the player keeps the fight on.
+                int team = obj_dude->data.critter.combat.team;
+                for (int index = 0; index < list_com; index++) {
+                    Object* critter = combat_list[index];
+                    if (critter != obj_dude
+                        && critter->data.critter.combat.team != team
+                        && (critter->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) == 0
+                        && is_within_perception(critter, obj_dude)) {
+                        combat_realtime_last_threat = now;
+                        break;
+                    }
+                }
+            }
+
+            // Nothing has threatened the player for a while: the fight is over.
+            if (now - combat_realtime_last_threat > REALTIME_IDLE_END) {
+                combat_end();
+                break;
             }
 
             Object* next = NULL;
@@ -2463,10 +2608,14 @@ static void combat_realtime_loop()
             }
 
             if (next != NULL) {
-                combat_realtime_next_turn[next] = get_time() + REALTIME_AI_INTERVAL;
+                combat_realtime_last_threat = get_time();
+                combat_realtime_next_turn[next] = 0xFFFFFFFF;
                 if (combat_turn(next, false) == -1) {
                     break;
                 }
+
+                combat_realtime_enemy_done = get_time();
+                combat_realtime_next_turn[next] = combat_realtime_enemy_done + REALTIME_AI_INTERVAL;
 
                 // `combat_turn` ends the interface for the player. Real-time
                 // combat keeps it on.
@@ -2482,6 +2631,7 @@ static void combat_realtime_loop()
 
     }
     combat_realtime_active = false;
+    combat_pause_running.clear();
 }
 
 // 0x420698
@@ -2911,16 +3061,27 @@ int combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocati
         return -1;
     }
 
+    {
+        char text[96];
+        snprintf(text, sizeof(text), "combat_attack ok hitMode=%d flags=0x%x damage=%d", main_ctd.hitMode, main_ctd.attackerFlags, main_ctd.defenderDamage);
+    }
+
+    if (attacker == obj_dude) {
+        combat_realtime_last_threat = get_time();
+    }
+
     // Real-time combat shows the number above the target when the blow lands.
     if (combat_realtime && main_ctd.defender != NULL) {
         bool hit = (main_ctd.attackerFlags & DAM_HIT) != 0;
         damage_popup_schedule(main_ctd.defender, main_ctd.defenderDamage, hit, (main_ctd.attackerFlags & DAM_CRITICAL) != 0, 220);
     }
 
-    if (actionPoints > attacker->data.critter.combat.ap) {
-        attacker->data.critter.combat.ap = 0;
-    } else {
-        attacker->data.critter.combat.ap -= actionPoints;
+    if (attacker != obj_dude || combat_vats_firing || !combat_realtime) {
+        if (actionPoints > attacker->data.critter.combat.ap) {
+            attacker->data.critter.combat.ap = 0;
+        } else {
+            attacker->data.critter.combat.ap -= actionPoints;
+        }
     }
 
     if (attacker == obj_dude) {
@@ -4818,8 +4979,21 @@ int combat_check_bad_shot(Object* attacker, Object* defender, int hitMode, bool 
         }
     }
 
-    if (item_w_mp_cost(attacker, hitMode, aiming) > attacker->data.critter.combat.ap) {
-        return COMBAT_BAD_SHOT_NOT_ENOUGH_AP;
+    if ((attacker != obj_dude || combat_vats_firing || !combat_realtime)) {
+        int shotCost = item_w_mp_cost(attacker, hitMode, aiming);
+
+        // A shot from the pause may cost more than the whole bar. It is still
+        // allowed when the bar is full.
+        if (attacker == obj_dude && combat_realtime) {
+            int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+            if (shotCost > maxAp) {
+                shotCost = maxAp;
+            }
+        }
+
+        if (shotCost > attacker->data.critter.combat.ap) {
+            return COMBAT_BAD_SHOT_NOT_ENOUGH_AP;
+        }
     }
 
     if (item_w_range(attacker, hitMode) < obj_dist(attacker, defender)) {
@@ -4897,6 +5071,12 @@ static void combat_attack_this_now(Object* a1)
         return;
     }
 
+    // Aiming a body part belongs to the pause. In real time every click is a
+    // plain shot, or the body part screen would open on each one.
+    if (combat_realtime) {
+        aiming = false;
+    }
+
     MessageListItem messageListItem;
     Object* item;
     char formattedText[80];
@@ -4960,6 +5140,7 @@ static void combat_attack_this_now(Object* a1)
         }
         return;
     }
+
 
     // Face the target first. A swing that starts while the player still looks
     // the other way would punch the air.

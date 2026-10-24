@@ -15,6 +15,7 @@
 
 #include "game/amutex.h"
 #include "game/art.h"
+#include "game/combat.h"
 #include "game/credits.h"
 #include "game/cycle.h"
 #include "game/endgame.h"
@@ -312,6 +313,9 @@ static void main_unload_new()
 // 0x472A54
 static void main_game_loop()
 {
+    // The game itself uses the whole screen.
+    svga_set_menu_zoom(false);
+
     bool cursorWasHidden = mouse_hidden();
     if (cursorWasHidden) {
         mouse_show();
@@ -325,8 +329,14 @@ static void main_game_loop()
         sharedFpsLimiter.mark();
 
         stick_move_update();
+        combat_vats_update();
 
         int keyCode = get_input();
+        if (keyCode == KEY_LOWERCASE_V || keyCode == KEY_UPPERCASE_V) {
+            combat_vats_pause();
+            keyCode = -1;
+        }
+
         game_handle_input(keyCode, false);
 
         // After the animations ran for this frame, so the view and the player

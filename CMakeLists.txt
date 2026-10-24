@@ -263,6 +263,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/plib/gnw/svga.h"
     "src/plib/gnw/text.cc"
     "src/plib/gnw/text.h"
+    "src/plib/gnw/text_pad.cc"
+    "src/plib/gnw/text_pad.h"
     "src/plib/gnw/vcr.cc"
     "src/plib/gnw/vcr.h"
     "src/plib/gnw/winmain.cc"

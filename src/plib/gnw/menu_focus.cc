@@ -138,6 +138,26 @@ void menu_focus_update()
     menu_focus_move(0, 0);
 }
 
+int menu_focus_get_key()
+{
+    if (!focusActive) {
+        return -1;
+    }
+
+    Window* window = GNW_top_button_window();
+    if (window == nullptr || window->id != focusWindowId) {
+        return -1;
+    }
+
+    for (Button* button = window->buttonListHead; button != nullptr; button = button->next) {
+        if (button->id == focusButtonId) {
+            return button->lefMouseDownEventCode;
+        }
+    }
+
+    return -1;
+}
+
 bool menu_focus_is_active()
 {
     return focusActive;
