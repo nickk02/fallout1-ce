@@ -2188,6 +2188,12 @@ static unsigned int combat_realtime_queued_at = 0;
 #define REALTIME_ATTACK_BUFFER 2500
 static unsigned int combat_realtime_ap_tick = 0;
 static unsigned int combat_realtime_enemy_done = 0;
+
+// When the player last had a reason to fight: an enemy that sees the player, an
+// enemy acting, or the player attacking. A fight with none of those for a while
+// ends by itself.
+static unsigned int combat_realtime_last_threat = 0;
+#define REALTIME_IDLE_END 8000
 static std::unordered_map<Object*, unsigned int> combat_realtime_next_turn;
 
 static void combat_attack_this_now(Object* a1);
@@ -2222,6 +2228,7 @@ static void combat_shift_timers(unsigned int delta)
     }
     combat_realtime_ap_tick += delta;
     combat_realtime_queued_at += delta;
+    combat_realtime_last_threat += delta;
     damage_popup_delay_all(delta);
 }
 
@@ -2469,6 +2476,7 @@ static int combat_realtime_pump()
 static void combat_realtime_loop()
 {
     combat_realtime_active = true;
+    combat_realtime_last_threat = get_time();
     combat_realtime_next_turn.clear();
     combat_realtime_queued_attack = NULL;
 
@@ -2535,6 +2543,25 @@ static void combat_realtime_loop()
             if (now - lastSequence >= REALTIME_SEQUENCE_INTERVAL) {
                 lastSequence = now;
                 combat_sequence();
+
+                // Any enemy that still perceives the player keeps the fight on.
+                int team = obj_dude->data.critter.combat.team;
+                for (int index = 0; index < list_com; index++) {
+                    Object* critter = combat_list[index];
+                    if (critter != obj_dude
+                        && critter->data.critter.combat.team != team
+                        && (critter->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) == 0
+                        && is_within_perception(critter, obj_dude)) {
+                        combat_realtime_last_threat = now;
+                        break;
+                    }
+                }
+            }
+
+            // Nothing has threatened the player for a while: the fight is over.
+            if (now - combat_realtime_last_threat > REALTIME_IDLE_END) {
+                combat_end();
+                break;
             }
 
             Object* next = NULL;
@@ -2558,6 +2585,7 @@ static void combat_realtime_loop()
             }
 
             if (next != NULL) {
+                combat_realtime_last_threat = get_time();
                 combat_realtime_next_turn[next] = 0xFFFFFFFF;
                 if (combat_turn(next, false) == -1) {
                     break;
@@ -3013,6 +3041,10 @@ int combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocati
     {
         char text[96];
         snprintf(text, sizeof(text), "combat_attack ok hitMode=%d flags=0x%x damage=%d", main_ctd.hitMode, main_ctd.attackerFlags, main_ctd.defenderDamage);
+    }
+
+    if (attacker == obj_dude) {
+        combat_realtime_last_threat = get_time();
     }
 
     // Real-time combat shows the number above the target when the blow lands.
