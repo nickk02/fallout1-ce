@@ -2175,7 +2175,9 @@ void combat_end()
 // enemy first acts, so the player can react.
 #define REALTIME_ENEMY_MIN_AP 3
 #define REALTIME_AI_FIRST_DELAY 450
-#define REALTIME_SEQUENCE_INTERVAL 5000
+// How often the list of fighters is rebuilt. A fight ends when the rebuilt list
+// has no enemy left, so this is also how soon it ends after the last one falls.
+#define REALTIME_SEQUENCE_INTERVAL 1000
 
 static bool combat_realtime_active = false;
 static bool combat_realtime_pumping = false;
