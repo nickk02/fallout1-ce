@@ -129,6 +129,10 @@ int gmovie_play(int game_movie, int game_movie_flags)
         return -1;
     }
 
+    // Movies fill the window like the menus do.
+    bool zoomWasOn = svga_menu_zoom_enabled();
+    svga_set_menu_zoom(true);
+
     if ((game_movie_flags & GAME_MOVIE_STOP_MUSIC) != 0) {
         gsound_background_stop();
     } else if ((game_movie_flags & GAME_MOVIE_PAUSE_MUSIC) != 0) {
@@ -232,6 +236,7 @@ int gmovie_play(int game_movie, int game_movie_flags)
         windowSetTextColor(r, g, b);
     }
 
+    svga_set_menu_zoom(zoomWasOn);
     win_delete(win);
 
     // CE: Destroying a window redraws only content it was covering (centered

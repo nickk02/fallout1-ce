@@ -520,9 +520,19 @@ void mouse_info()
         y = 0;
     }
 
-    // Adjust for mouse senstivity.
-    x = (int)(x * mouse_sensitivity);
-    y = (int)(y * mouse_sensitivity);
+    // Adjust for mouse senstivity. With the menu zoom the picture is larger, so
+    // the same hand movement covers fewer game pixels. The fractions are kept.
+    {
+        static float remainderX = 0.0f;
+        static float remainderY = 0.0f;
+        float factor = mouse_sensitivity / svga_menu_zoom_scale();
+        float fx = x * factor + remainderX;
+        float fy = y * factor + remainderY;
+        x = (int)fx;
+        y = (int)fy;
+        remainderX = fx - x;
+        remainderY = fy - y;
+    }
 
     bool pointerNeedsWarp = false;
     if (mouseData.absolute) {
@@ -734,6 +744,27 @@ void mouse_set_position(int x, int y)
 // 0x4B52C0
 static void mouse_clip()
 {
+    if (svga_menu_zoom_active()) {
+        int left;
+        int top;
+        int right;
+        int bottom;
+        svga_menu_zoom_area(&left, &top, &right, &bottom);
+
+        if (mouse_hotx + mouse_x < left) {
+            mouse_x = left - mouse_hotx;
+        } else if (mouse_hotx + mouse_x > right) {
+            mouse_x = right - mouse_hotx;
+        }
+
+        if (mouse_hoty + mouse_y < top) {
+            mouse_y = top - mouse_hoty;
+        } else if (mouse_hoty + mouse_y > bottom) {
+            mouse_y = bottom - mouse_hoty;
+        }
+        return;
+    }
+
     if (mouse_hotx + mouse_x < scr_size.ulx) {
         mouse_x = scr_size.ulx - mouse_hotx;
     } else if (mouse_hotx + mouse_x > scr_size.lrx) {

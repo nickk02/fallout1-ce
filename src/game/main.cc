@@ -313,6 +313,9 @@ static void main_unload_new()
 // 0x472A54
 static void main_game_loop()
 {
+    // The game itself uses the whole screen.
+    svga_set_menu_zoom(false);
+
     bool cursorWasHidden = mouse_hidden();
     if (cursorWasHidden) {
         mouse_show();

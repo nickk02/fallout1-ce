@@ -95,6 +95,9 @@ static CacheEntry* background_key;
 // 0x472F80
 int main_menu_create()
 {
+    // The menus fill the window.
+    svga_set_menu_zoom(true);
+
     int fid;
     MessageListItem msg;
     int len;

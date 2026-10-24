@@ -27,6 +27,26 @@ bool svga_init(VideoOptions* video_options);
 void svga_exit();
 void svga_toggle_fullscreen();
 
+// The menus are 640 by 480 pictures. While this is on, that part of the screen
+// is enlarged to fill the window, and the pointer follows. Used for the main
+// menu and what it opens.
+void svga_set_menu_zoom(bool enabled);
+bool svga_menu_zoom_active();
+
+// Makes the zoom show this rectangle of the game screen instead of the menu
+// picture. A movie uses it to fill the window. Turning the zoom on or off puts
+// the menu picture back.
+void svga_set_menu_zoom_area(int x, int y, int width, int height);
+
+// `true` when the zoom was asked for, even if the screen is too small for it.
+bool svga_menu_zoom_enabled();
+
+// Screen pixels per game pixel while the zoom is on, 1 otherwise.
+float svga_menu_zoom_scale();
+
+// The part of the game screen that is shown while the zoom is on.
+void svga_menu_zoom_area(int* left, int* top, int* right, int* bottom);
+
 // Minimizes the window. Full screen is left first, because a full screen window
 // cannot be minimized.
 void svga_minimize();

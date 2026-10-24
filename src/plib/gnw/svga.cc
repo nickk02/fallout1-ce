@@ -1,6 +1,7 @@
 #include "plib/gnw/svga.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "plib/gnw/gnw.h"
@@ -12,6 +13,7 @@ namespace fallout {
 
 static bool createRenderer(int width, int height);
 static void destroyRenderer();
+static bool svga_zoom_geometry(int* srcX, int* srcY, float* scale, float* dstX, float* dstY);
 
 // screen rect
 Rect scr_size;
@@ -146,6 +148,16 @@ bool svga_get_pointer_position(int* x, int* y)
     float logicalY;
     SDL_RenderWindowToLogical(gSdlRenderer, (float)windowX, (float)windowY, &logicalX, &logicalY);
 
+    int srcX;
+    int srcY;
+    float scale;
+    float dstX;
+    float dstY;
+    if (svga_zoom_geometry(&srcX, &srcY, &scale, &dstX, &dstY)) {
+        logicalX = srcX + (logicalX - dstX) / scale;
+        logicalY = srcY + (logicalY - dstY) / scale;
+    }
+
     *x = (int)logicalX;
     *y = (int)logicalY;
     return true;
@@ -166,9 +178,21 @@ void svga_set_pointer_position(int x, int y)
 
     gLastWarpTicks = SDL_GetTicks();
 
+    float logicalX = (float)x;
+    float logicalY = (float)y;
+    int srcX;
+    int srcY;
+    float scale;
+    float dstX;
+    float dstY;
+    if (svga_zoom_geometry(&srcX, &srcY, &scale, &dstX, &dstY)) {
+        logicalX = dstX + ((float)x - srcX) * scale;
+        logicalY = dstY + ((float)y - srcY) * scale;
+    }
+
     int windowX;
     int windowY;
-    SDL_RenderLogicalToWindow(gSdlRenderer, (float)x, (float)y, &windowX, &windowY);
+    SDL_RenderLogicalToWindow(gSdlRenderer, logicalX, logicalY, &windowX, &windowY);
     SDL_WarpMouseInWindow(gSdlWindow, windowX, windowY);
 }
 
@@ -410,6 +434,107 @@ void handleWindowSizeChanged()
 {
     destroyRenderer();
     createRenderer(screenGetWidth(), screenGetHeight());
+}
+
+static bool gMenuZoom = false;
+
+// The part of the game screen the zoom shows. By default the 640 by 480 menu
+// picture in the middle; a movie sets the rectangle it plays in.
+static bool gZoomCustom = false;
+static int gZoomX = 0;
+static int gZoomY = 0;
+static int gZoomW = 640;
+static int gZoomH = 480;
+
+static void svga_zoom_size(int* width, int* height)
+{
+    *width = gZoomCustom ? gZoomW : 640;
+    *height = gZoomCustom ? gZoomH : 480;
+}
+
+static bool svga_zoom_geometry(int* srcX, int* srcY, float* scale, float* dstX, float* dstY)
+{
+    int width = screenGetWidth();
+    int height = screenGetHeight();
+    if (!gMenuZoom || (width <= 640 && height <= 480)) {
+        return false;
+    }
+
+    int areaW;
+    int areaH;
+    svga_zoom_size(&areaW, &areaH);
+    if (areaW <= 0 || areaH <= 0) {
+        return false;
+    }
+
+    float scaleX = (float)width / (float)areaW;
+    float scaleY = (float)height / (float)areaH;
+    float fit = scaleX < scaleY ? scaleX : scaleY;
+
+    *srcX = gZoomCustom ? gZoomX : (width - 640) / 2;
+    *srcY = gZoomCustom ? gZoomY : (height - 480) / 2;
+    *scale = fit;
+    *dstX = ((float)width - (float)areaW * fit) / 2.0f;
+    *dstY = ((float)height - (float)areaH * fit) / 2.0f;
+    return true;
+}
+
+void svga_set_menu_zoom(bool enabled)
+{
+    gMenuZoom = enabled;
+    gZoomCustom = false;
+}
+
+void svga_set_menu_zoom_area(int x, int y, int width, int height)
+{
+    gZoomCustom = true;
+    gZoomX = x;
+    gZoomY = y;
+    gZoomW = width;
+    gZoomH = height;
+}
+
+bool svga_menu_zoom_enabled()
+{
+    return gMenuZoom;
+}
+
+bool svga_menu_zoom_active()
+{
+    int srcX;
+    int srcY;
+    float scale;
+    float dstX;
+    float dstY;
+    return svga_zoom_geometry(&srcX, &srcY, &scale, &dstX, &dstY);
+}
+
+float svga_menu_zoom_scale()
+{
+    int srcX;
+    int srcY;
+    float scale;
+    float dstX;
+    float dstY;
+    return svga_zoom_geometry(&srcX, &srcY, &scale, &dstX, &dstY) ? scale : 1.0f;
+}
+
+void svga_menu_zoom_area(int* left, int* top, int* right, int* bottom)
+{
+    int srcX;
+    int srcY;
+    float scale;
+    float dstX;
+    float dstY;
+    if (svga_zoom_geometry(&srcX, &srcY, &scale, &dstX, &dstY)) {
+        int areaW;
+        int areaH;
+        svga_zoom_size(&areaW, &areaH);
+        *left = srcX;
+        *top = srcY;
+        *right = srcX + areaW - 1;
+        *bottom = srcY + areaH - 1;
+    }
 }
 
 static bool gFocusRectSet = false;
@@ -676,17 +801,37 @@ void renderPresent()
         SDL_UpdateTexture(gSdlTexture, NULL, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     }
 
+    SDL_Texture* shown = gSdlTexture;
     if (gScaledTexture != NULL) {
         // First pass: enlarge by a whole number with hard edges.
         SDL_SetRenderTarget(gSdlRenderer, gScaledTexture);
         SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);
         SDL_SetRenderTarget(gSdlRenderer, NULL);
+        shown = gScaledTexture;
+    }
 
-        SDL_RenderClear(gSdlRenderer);
-        SDL_RenderCopy(gSdlRenderer, gScaledTexture, NULL, NULL);
+    SDL_RenderClear(gSdlRenderer);
+
+    int zoomX;
+    int zoomY;
+    float zoomScale;
+    float zoomDstX;
+    float zoomDstY;
+    if (svga_zoom_geometry(&zoomX, &zoomY, &zoomScale, &zoomDstX, &zoomDstY)) {
+        // Only the menu's 640 by 480 picture is shown, enlarged to fit.
+        int textureWidth;
+        int textureHeight;
+        SDL_QueryTexture(shown, NULL, NULL, &textureWidth, &textureHeight);
+        float factor = (float)textureWidth / (float)screenGetWidth();
+
+        int areaW;
+        int areaH;
+        svga_zoom_size(&areaW, &areaH);
+        SDL_Rect source = { (int)(zoomX * factor), (int)(zoomY * factor), (int)(areaW * factor), (int)(areaH * factor) };
+        SDL_FRect destination = { zoomDstX, zoomDstY, (float)areaW * zoomScale, (float)areaH * zoomScale };
+        SDL_RenderCopyF(gSdlRenderer, shown, &source, &destination);
     } else {
-        SDL_RenderClear(gSdlRenderer);
-        SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);
+        SDL_RenderCopy(gSdlRenderer, shown, NULL, NULL);
     }
 
     // The focus frame is drawn over the finished picture so the game never
@@ -697,8 +842,14 @@ void renderPresent()
         }
 
         if (gFocusTexture != NULL) {
-            SDL_Rect destination = { gFocusRect.x - FOCUS_MARGIN, gFocusRect.y - FOCUS_MARGIN, gFocusRect.w + FOCUS_MARGIN * 2, gFocusRect.h + FOCUS_MARGIN * 2 };
-            SDL_RenderCopy(gSdlRenderer, gFocusTexture, NULL, &destination);
+            SDL_FRect destination = { (float)(gFocusRect.x - FOCUS_MARGIN), (float)(gFocusRect.y - FOCUS_MARGIN), (float)(gFocusRect.w + FOCUS_MARGIN * 2), (float)(gFocusRect.h + FOCUS_MARGIN * 2) };
+            if (zoomScale != 0.0f && svga_menu_zoom_active()) {
+                destination.x = zoomDstX + ((float)(gFocusRect.x - FOCUS_MARGIN) - zoomX) * zoomScale;
+                destination.y = zoomDstY + ((float)(gFocusRect.y - FOCUS_MARGIN) - zoomY) * zoomScale;
+                destination.w *= zoomScale;
+                destination.h *= zoomScale;
+            }
+            SDL_RenderCopyF(gSdlRenderer, gFocusTexture, NULL, &destination);
         }
     }
 

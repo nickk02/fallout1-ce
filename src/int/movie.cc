@@ -299,6 +299,9 @@ static void movie_MVE_ShowFrame(SDL_Surface* surface, int srcWidth, int srcHeigh
     destRect.x += winRect.ulx;
     destRect.y += winRect.uly;
 
+    // The zoom follows the movie, so it fills the window whatever its size.
+    svga_set_menu_zoom_area(destRect.x, destRect.y, destRect.w, destRect.h);
+
     if (movieCaptureFrameFunc != NULL) {
         if (SDL_LockSurface(surface) == 0) {
             movieCaptureFrameFunc(static_cast<unsigned char*>(surface->pixels),
@@ -316,6 +319,7 @@ static void movie_MVE_ShowFrame(SDL_Surface* surface, int srcWidth, int srcHeigh
     SDL_SetSurfacePalette(surface, gSdlSurface->format->palette);
     SDL_BlitSurface(surface, &srcRect, gSdlSurface, &destRect);
     SDL_BlitSurface(gSdlSurface, NULL, gSdlTextureSurface, NULL);
+
     renderPresent();
 }
 
