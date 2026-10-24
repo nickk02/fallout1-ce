@@ -592,10 +592,10 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         break;
     case KEY_UPPERCASE_M:
     case KEY_LOWERCASE_M:
-        // Next attack mode of the weapon in the active hand.
+        // Map. N is the next attack mode.
         if (intface_is_enabled()) {
             gsound_play_sfx_file("ib1p1xx1");
-            intface_toggle_item_state();
+            automap(true, false);
         }
         break;
     case KEY_UPPERCASE_B:

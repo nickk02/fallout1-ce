@@ -449,7 +449,7 @@ static void controller_handle_button(SDL_GameControllerButton button)
             input_inject_key(SDL_SCANCODE_R); // Reload
             break;
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-            input_inject_key(SDL_SCANCODE_M); // Next attack mode
+            input_inject_key(SDL_SCANCODE_N); // Next attack mode
             break;
         case SDL_CONTROLLER_BUTTON_LEFTSTICK:
             input_inject_key(SDL_SCANCODE_TAB); // Automap

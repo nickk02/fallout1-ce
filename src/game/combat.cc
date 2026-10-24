@@ -1783,12 +1783,16 @@ static void combat_begin(Object* a1)
 
         tile_refresh_display();
         game_ui_disable(0);
-        gmouse_set_cursor(MOUSE_CURSOR_WAIT_WATCH);
+        if (!combat_realtime) {
+            gmouse_set_cursor(MOUSE_CURSOR_WAIT_WATCH);
+        }
         combat_ending_guy = NULL;
         combat_begin_extra(a1);
-        // The end turn panel slides in and out in about half a second, which stalls
-        // real-time play.
-        intface_end_window_open(!combat_realtime);
+        // Real-time fights do not show the end turn panel, which also took half a
+        // second to slide in. Nothing on screen says a fight started.
+        if (!combat_realtime) {
+            intface_end_window_open(true);
+        }
         gmouse_enable_scrolling();
     }
 }
