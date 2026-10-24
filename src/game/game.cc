@@ -49,6 +49,7 @@
 #include "int/window.h"
 #include "platform_compat.h"
 #include "plib/color/color.h"
+#include "plib/gnw/controller.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -190,6 +191,14 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
             if (configGetBool(&resolutionConfig, "MAIN", "REALTIME_COMBAT", &realtimeCombat)) {
                 combat_set_realtime(realtimeCombat);
             }
+
+            int deadZone = 20;
+            int cursorSpeed = 600;
+            bool swapAB = false;
+            config_get_value(&resolutionConfig, "MAIN", "CONTROLLER_DEAD_ZONE", &deadZone);
+            config_get_value(&resolutionConfig, "MAIN", "CONTROLLER_CURSOR_SPEED", &cursorSpeed);
+            configGetBool(&resolutionConfig, "MAIN", "CONTROLLER_SWAP_AB", &swapAB);
+            controller_set_options(deadZone, cursorSpeed, swapAB);
 
             int scaleValue;
             if (config_get_value(&resolutionConfig, "MAIN", "SCALE_2X", &scaleValue)) {

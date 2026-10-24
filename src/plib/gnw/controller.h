@@ -16,6 +16,12 @@ typedef enum ControllerAction {
 
 bool controller_init();
 
+// Sets the dead zone (5 to 60 percent of the stick's travel), the speed of the
+// free cursor in pixels per second, and whether A and B trade places. Read from
+// f1_res.ini at start: CONTROLLER_DEAD_ZONE, CONTROLLER_CURSOR_SPEED and
+// CONTROLLER_SWAP_AB.
+void controller_set_options(int deadZonePercent, int cursorSpeed, bool swapAB);
+
 // `true` while a controller is open.
 bool controller_is_connected();
 void controller_exit();

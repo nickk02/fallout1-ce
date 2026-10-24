@@ -9,10 +9,13 @@
 namespace fallout {
 
 // Radial dead zone, as a fraction of full deflection.
-#define CONTROLLER_DEAD_ZONE 0.2f
+static float controllerDeadZone = 0.2f;
+#define CONTROLLER_DEAD_ZONE controllerDeadZone
 
 // Cursor speed at full right stick deflection, in game pixels per second.
-#define CONTROLLER_CURSOR_SPEED 600.0f
+static float controllerCursorSpeed = 600.0f;
+#define CONTROLLER_CURSOR_SPEED controllerCursorSpeed
+static bool controllerSwapAB = false;
 
 // Trigger deflection that counts as a press.
 #define CONTROLLER_TRIGGER_THRESHOLD 16000
@@ -41,6 +44,27 @@ static void controller_read_stick(SDL_GameControllerAxis axisX, SDL_GameControll
 static void controller_text_pad_poll(Uint32 now);
 static bool controller_is_neutral();
 static void controller_list_poll(Uint32 now);
+
+// Reads a button, with A and B swapped when the player asked for that.
+static bool controller_button_down(SDL_GameControllerButton button)
+{
+    if (controllerSwapAB) {
+        if (button == SDL_CONTROLLER_BUTTON_A) {
+            button = SDL_CONTROLLER_BUTTON_B;
+        } else if (button == SDL_CONTROLLER_BUTTON_B) {
+            button = SDL_CONTROLLER_BUTTON_A;
+        }
+    }
+
+    return SDL_GameControllerGetButton(controller, button) != 0;
+}
+
+void controller_set_options(int deadZonePercent, int cursorSpeed, bool swapAB)
+{
+    controllerDeadZone = (deadZonePercent < 5 ? 5 : (deadZonePercent > 60 ? 60 : deadZonePercent)) / 100.0f;
+    controllerCursorSpeed = (float)(cursorSpeed < 100 ? 100 : (cursorSpeed > 2000 ? 2000 : cursorSpeed));
+    controllerSwapAB = swapAB;
+}
 
 bool controller_init()
 {
@@ -198,7 +222,7 @@ bool controller_handle_key(int scancode, bool pressed)
 
 bool controller_a_is_down()
 {
-    return controller != nullptr && !controllerSuppressed && SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+    return controller != nullptr && !controllerSuppressed && controller_button_down(SDL_CONTROLLER_BUTTON_A) != 0;
 }
 
 void controller_set_inventory_keys(bool enabled)
@@ -247,7 +271,7 @@ bool controller_get_mouse_state(int* x, int* y, unsigned char* leftButton, unsig
     }
     listPolling = false;
 
-    bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool a = controller_button_down(SDL_CONTROLLER_BUTTON_A) != 0;
 
     // The d-pad or the left stick moves the focus between buttons.
     int dirX = 0;
@@ -384,6 +408,14 @@ static void controller_close()
 // already has, so the controller never duplicates game logic.
 static void controller_handle_button(SDL_GameControllerButton button)
 {
+    if (controllerSwapAB) {
+        if (button == SDL_CONTROLLER_BUTTON_A) {
+            button = SDL_CONTROLLER_BUTTON_B;
+        } else if (button == SDL_CONTROLLER_BUTTON_B) {
+            button = SDL_CONTROLLER_BUTTON_A;
+        }
+    }
+
     if (controller_world_is_active()) {
         switch (button) {
         case SDL_CONTROLLER_BUTTON_A:
@@ -517,7 +549,7 @@ static void controller_read_stick(SDL_GameControllerAxis axisXId, SDL_GameContro
 // The d-pad or left stick moves over the character picker and A types.
 static void controller_text_pad_poll(Uint32 now)
 {
-    bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool a = controller_button_down(SDL_CONTROLLER_BUTTON_A) != 0;
 
     int dirX = 0;
     int dirY = 0;
@@ -577,7 +609,7 @@ static void controller_text_pad_poll(Uint32 now)
 // The d-pad or left stick steps through a list and A confirms.
 static void controller_list_poll(Uint32 now)
 {
-    bool a = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A) != 0;
+    bool a = controller_button_down(SDL_CONTROLLER_BUTTON_A) != 0;
 
     int dirY = 0;
     if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) dirY = -1;
