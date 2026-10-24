@@ -66,6 +66,7 @@ static void combat_sequence();
 static int combat_input();
 static int combat_turn(Object* a1, bool a2);
 static bool combat_should_end();
+static void combat_realtime_forget();
 static bool check_ranged_miss(Attack* attack);
 static int shoot_along_path(Attack* attack, int a2, int a3, int anim);
 static int compute_spray(Attack* attack, int accuracy, int* roundsHitMainTargetPtr, int* roundsSpentPtr, int anim);
@@ -1613,6 +1614,8 @@ void combat_reset()
     obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
     combat_free_move = 0;
     combat_ending_guy = NULL;
+
+    combat_realtime_forget();
 }
 
 // 0x41F950
@@ -1716,6 +1719,14 @@ int combat_load(DB_FILE* stream)
 int combat_save(DB_FILE* stream)
 {
     int index;
+
+    // A real-time fight has no turn order to keep. The save records no fight, so
+    // the game loads with the player free to move, and the creatures start the
+    // fight again when they notice the player.
+    if (combat_realtime) {
+        if (db_fwriteUInt32(stream, combat_state & ~COMBAT_STATE_0x01) == -1) return -1;
+        return 0;
+    }
 
     if (db_fwriteUInt32(stream, combat_state) == -1) return -1;
 
@@ -2420,6 +2431,18 @@ void combat_vats_update()
         stru.field_1C = 0;
         combat(&stru);
     }
+}
+
+// Nothing queued for a fight may outlive the map it was queued on: the
+// creatures it points to are gone.
+static void combat_realtime_forget()
+{
+    combat_realtime_queued_attack = NULL;
+    combat_pause_building.clear();
+    combat_pause_running.clear();
+    combat_realtime_next_turn.clear();
+    combat_paused = false;
+    combat_vats_firing = false;
 }
 
 // Stops time, in a fight or out of one.
