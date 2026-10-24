@@ -201,8 +201,74 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed)
     return true;
 }
 
+// The tile of a click-to-move walk and how it is going.
+static int gotoTile = -1;
+static bool gotoRunning = false;
+static float gotoBest = 0.0f;
+static unsigned int gotoBestAt = 0;
+
+void free_move_goto(int tile, bool running)
+{
+    gotoTile = tile;
+    gotoRunning = running;
+    gotoBest = 1e9f;
+    gotoBestAt = get_time();
+}
+
+bool free_move_goto_active()
+{
+    return gotoTile != -1;
+}
+
+void free_move_goto_cancel()
+{
+    gotoTile = -1;
+}
+
+bool free_move_goto_step(float elapsed)
+{
+    if (gotoTile == -1) {
+        return false;
+    }
+
+    int originX;
+    int originY;
+    int targetX;
+    int targetY;
+    if (tile_coord(obj_dude->tile, &originX, &originY, obj_dude->elevation) == -1
+        || tile_coord(gotoTile, &targetX, &targetY, obj_dude->elevation) == -1) {
+        free_move_stop();
+        return false;
+    }
+
+    float dx = (float)(targetX - (originX + obj_dude->x));
+    float dy = (float)(targetY - (originY + obj_dude->y));
+    float distance = sqrtf(dx * dx + dy * dy);
+
+    // Arrived.
+    if (distance < 6.0f) {
+        free_move_stop();
+        return false;
+    }
+
+    // Give up when the way is blocked and no progress is made.
+    unsigned int now = get_time();
+    if (distance < gotoBest - 2.0f) {
+        gotoBest = distance;
+        gotoBestAt = now;
+    } else if (now - gotoBestAt > 700) {
+        free_move_stop();
+        return false;
+    }
+
+    free_move_step(dx / distance, dy / distance, gotoRunning, elapsed);
+    return true;
+}
+
 void free_move_stop()
 {
+    gotoTile = -1;
+
     if (!active) {
         return;
     }

@@ -5014,16 +5014,18 @@ static void combat_attack_this_now(Object* a1)
         return;
     }
 
+    // Aiming a body part belongs to the pause. In real time every click is a
+    // plain shot, or the body part screen would open on each one.
+    if (combat_realtime) {
+        aiming = false;
+    }
+
     MessageListItem messageListItem;
     Object* item;
     char formattedText[80];
     const char* sfx;
 
     int rc = combat_check_bad_shot(obj_dude, a1, hitMode, aiming);
-    {
-        char text[96];
-        snprintf(text, sizeof(text), "check rc=%d hitMode=%d aiming=%d running=%d", rc, hitMode, aiming ? 1 : 0, combat_turn_running);
-    }
     switch (rc) {
     case COMBAT_BAD_SHOT_NO_AMMO:
         item = item_hit_with(obj_dude, hitMode);

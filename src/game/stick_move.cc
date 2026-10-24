@@ -101,18 +101,28 @@ static void stick_move_update_impl(bool inCombat, bool paused)
     float x;
     float y;
     bool walkOnly;
-    if (!stick_move_get_vector(&x, &y, &walkOnly)) {
-        free_move_stop();
-        return;
-    }
-
-    // Glide in the direction asked for, as opposed to following hex steps.
     unsigned int now = get_time();
     float elapsed = (now - lastMoveTicks) / 1000.0f;
     lastMoveTicks = now;
     if (elapsed > 0.1f) {
         elapsed = 0.1f;
     }
+
+    if (!stick_move_get_vector(&x, &y, &walkOnly)) {
+        // A click on the ground walks there the same way the keys do.
+        if (free_move_goto_active()) {
+            free_move_goto_step(elapsed);
+            return;
+        }
+
+        free_move_stop();
+        return;
+    }
+
+    // The keys or the stick take over from a walk to a clicked tile.
+    free_move_goto_cancel();
+
+    // Glide in the direction asked for, as opposed to following hex steps.
 
     // Once running, the stick may drop a little before the character slows to a
     // walk, so the cycle does not flip back and forth at the threshold.
