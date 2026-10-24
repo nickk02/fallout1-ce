@@ -2689,6 +2689,9 @@ static int InitWorldMapData()
             WM_WINDOW_HEIGHT,
             256,
             WINDOW_DONT_MOVE_TOP);
+
+        // The map takes over the whole view, so it fills the window.
+        svga_set_menu_zoom(world_win != -1);
         if (world_win == -1) {
             debug_printf("\n *** WORLD MAP: Error adding world map window! ***\n");
 
@@ -3283,6 +3286,9 @@ WorldMapContext town_map(WorldMapContext ctx)
             WM_WINDOW_HEIGHT,
             256,
             WINDOW_DONT_MOVE_TOP);
+
+        // The map takes over the whole view, so it fills the window.
+        svga_set_menu_zoom(world_win != -1);
         if (world_win == -1) {
             debug_printf("\n *** WORLD MAP: Error adding town map window! ***\n");
             // FIXME: Reuses `index` from `hvrbtn` but releases `tmapidsav`.
@@ -3495,6 +3501,7 @@ WorldMapContext town_map(WorldMapContext ctx)
 void KillWorldWin()
 {
     if (wwin_flag) {
+        svga_set_menu_zoom(false);
         win_delete(world_win);
         tbutntgl = 0;
         wwin_flag = 0;

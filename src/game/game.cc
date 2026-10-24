@@ -1371,6 +1371,9 @@ static void game_splash_screen()
     db_fread(data, 1, SPLASH_WIDTH * SPLASH_HEIGHT, stream);
     db_fclose(stream);
 
+    // The splash picture fills the window like the menus.
+    svga_set_menu_zoom(true);
+
     int splashWindowX = (screenGetWidth() - SPLASH_WIDTH) / 2;
     int splashWindowY = (screenGetHeight() - SPLASH_HEIGHT) / 2;
     scr_blit(data, SPLASH_WIDTH, SPLASH_HEIGHT, 0, 0, SPLASH_WIDTH, SPLASH_HEIGHT, splashWindowX, splashWindowY);
