@@ -373,7 +373,9 @@ static int soft_target_describe(Object* target, bool inCombat, char* title, size
 {
     bool pad = input_controller_in_use();
     const char* use = pad ? "A" : "E";
-    const char* attack = pad ? "RT" : "F";
+    // With a mouse the natural way to attack is to click the creature. F does
+    // the same.
+    const char* attack = pad ? "RT" : "Click";
     const char* inspect = pad ? "Y" : "Q";
 
     snprintf(title, titleSize, "%s:", object_name(target));
