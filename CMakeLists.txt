@@ -23,19 +23,41 @@ set(CMAKE_CXX_EXTENSIONS NO)
 option(ASAN "Enable address sanitizer" OFF)
 option(UBSAN "Enable undefined behaviour sanitizer" OFF)
 
+if(ANDROID OR IOS)
+    set(FALLOUT_BUILD_TESTS_DEFAULT OFF)
+else()
+    set(FALLOUT_BUILD_TESTS_DEFAULT ON)
+endif()
+option(FALLOUT_BUILD_TESTS "Build asset-free runtime tests (run with ctest)" ${FALLOUT_BUILD_TESTS_DEFAULT})
+
 if (ANDROID)
     add_library(${EXECUTABLE_NAME} SHARED)
 else()
     add_executable(${EXECUTABLE_NAME} WIN32 MACOSX_BUNDLE)
 endif()
 
+# Sanitizer flags are shared with the test executable through this interface
+# target, so engine sources compiled directly into tests are instrumented too.
+add_library(fallout-sanitizers INTERFACE)
+if(ASAN OR UBSAN)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        message(FATAL_ERROR "ASAN and UBSAN need GCC or Clang. Compiler is ${CMAKE_CXX_COMPILER_ID}.")
+    endif()
+endif()
 if(ASAN)
-    target_compile_options(${EXECUTABLE_NAME} PUBLIC "-fsanitize=address;-fsanitize-recover=address")
-    target_link_options(${EXECUTABLE_NAME} PUBLIC "-fsanitize=address;-fsanitize-recover=address")
+    target_compile_options(fallout-sanitizers INTERFACE "-fsanitize=address;-fsanitize-recover=address")
+    target_link_options(fallout-sanitizers INTERFACE "-fsanitize=address;-fsanitize-recover=address")
 endif()
 if(UBSAN)
-    target_compile_options(${EXECUTABLE_NAME} PUBLIC "-fsanitize=undefined")
-    target_link_options(${EXECUTABLE_NAME} PUBLIC "-fsanitize=undefined")
+    target_compile_options(fallout-sanitizers INTERFACE "-fsanitize=undefined")
+    target_link_options(fallout-sanitizers INTERFACE "-fsanitize=undefined")
+endif()
+target_link_libraries(${EXECUTABLE_NAME} fallout-sanitizers)
+
+# The first-run home folder logic is POSIX code used only by the macOS desktop
+# startup in winmain.cc.
+if(APPLE AND NOT IOS)
+    target_sources(${EXECUTABLE_NAME} PUBLIC "src/game_home.cc")
 endif()
 
 target_include_directories(${EXECUTABLE_NAME} PUBLIC src)
@@ -277,7 +299,6 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/audio_engine.cc"
     "src/audio_engine.h"
     "src/fps_limiter.cc"
-    "src/game_home.cc"
     "src/game_home.h"
     "src/fps_limiter.h"
     "src/platform_compat.cc"
@@ -393,4 +414,9 @@ if(APPLE)
     endif()
 
     include(CPack)
+endif()
+
+if(FALLOUT_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory("tests/runtime")
 endif()

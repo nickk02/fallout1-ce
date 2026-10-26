@@ -1,6 +1,7 @@
 name: Build
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -289,3 +290,57 @@ jobs:
           name: fallout-ce-windows-${{ matrix.arch }}
           path:  build/RelWithDebInfo/fallout-ce.exe
           retention-days: 7
+
+  # Asset-free desktop evidence on current runner images. The jobs above stay
+  # as they are. The macOS build is universal (x86_64 and arm64) and runs on an
+  # arm64 host, so only the arm64 slice of the tests executes.
+  desktop:
+    name: Desktop (${{ matrix.name }})
+
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            os: macos-14
+            configure-args: ""
+          - name: Linux x64
+            os: ubuntu-24.04
+            configure-args: ""
+          - name: Windows x64
+            os: windows-2022
+            configure-args: -A x64
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev zlib1g-dev
+
+      - name: Configure
+        run: |
+          cmake \
+            -B build \
+            -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+            ${{ matrix.configure-args }} \
+            # EOL
+
+      - name: Build
+        run: |
+          cmake \
+            --build build \
+            --config RelWithDebInfo \
+            --parallel 4 \
+            # EOL
+
+      - name: Test
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
+
+      - name: Revision
+        run: echo "sha=${{ github.sha }} os=${{ matrix.os }} runner=${{ runner.os }}/${{ runner.arch }} run=${{ github.run_id }}"
