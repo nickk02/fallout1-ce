@@ -470,9 +470,9 @@ void handle_inventory()
         return;
     }
 
-    unsigned int freezeStart = 0;
+    CombatFreeze freeze;
     if (realtimeFight) {
-        freezeStart = combat_freeze_begin();
+        freeze = combat_freeze_begin();
     }
 
     if (isInCombat() && !realtimeFight) {
@@ -608,7 +608,7 @@ void handle_inventory()
     inven_exit();
 
     if (realtimeFight) {
-        combat_freeze_end(freezeStart);
+        combat_freeze_end(freeze);
     }
 
     if (inven_dude == obj_dude) {
