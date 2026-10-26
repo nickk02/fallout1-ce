@@ -43,6 +43,7 @@
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/vcr.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -2954,6 +2955,7 @@ static void op_play_gmovie(Program* program)
     // CE: Disable map updates. Needed to stop animation of objects (dude in
     // particular) when playing movies (the problem can be seen as visual
     // artifacts when playing endgame oilrig explosion).
+    ModalPause modalPause;
     bool isoWasDisabled = map_disable_bk_processes();
 
     gDialogDisableBK();
@@ -2974,6 +2976,7 @@ static void op_play_gmovie(Program* program)
     if (isoWasDisabled) {
         map_enable_bk_processes();
     }
+    modalPause.release();
 
     program->flags &= ~PROGRAM_FLAG_0x20;
 }

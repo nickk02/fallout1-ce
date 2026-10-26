@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/bmpdlog.h"
@@ -47,6 +49,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -1009,6 +1012,10 @@ int world_map(WorldMapContext ctx)
 
     iso_was_disabled = 0;
 
+    // Released by the destructor on the error returns, which leave the
+    // processes disabled as before.
+    std::optional<ModalPause> world_pause;
+
     soundUpdate();
 
     is_moving = 0;
@@ -1136,6 +1143,7 @@ int world_map(WorldMapContext ctx)
                 colorTable[0]);
             win_draw(display_win);
 
+            world_pause.emplace();
             bk_enable = map_disable_bk_processes();
             cycle_disable();
             iso_was_disabled = 1;
@@ -2296,6 +2304,7 @@ int world_map(WorldMapContext ctx)
             if (bk_enable) {
                 map_enable_bk_processes();
             }
+            world_pause.reset();
             cycle_enable();
         }
 
@@ -3384,6 +3393,7 @@ WorldMapContext town_map(WorldMapContext ctx)
     win_draw(world_win);
     renderPresent();
 
+    ModalPause town_pause;
     bk_enable = map_disable_bk_processes();
     cycle_disable();
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -3491,6 +3501,7 @@ WorldMapContext town_map(WorldMapContext ctx)
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    town_pause.release();
 
     cycle_enable();
 

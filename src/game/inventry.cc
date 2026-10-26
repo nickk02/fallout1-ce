@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <vector>
 
 #include "game/actions.h"
 #include "game/anim.h"
@@ -46,6 +47,7 @@
 #include "plib/gnw/menu_focus.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -316,6 +318,10 @@ static Inventory* btable_pud;
 
 // 0x59CEE8
 static bool inven_ui_was_disabled;
+
+// One pause per open inventory window, released in the reverse order by
+// exit_inventory().
+static std::vector<ModalPause> inven_pauses;
 
 // 0x59CEEC
 static Object* i_worn;
@@ -1319,6 +1325,7 @@ bool setup_inventory(int inventoryWindowType)
 
     adjust_fid();
 
+    inven_pauses.emplace_back();
     bool isoWasEnabled = map_disable_bk_processes();
 
     gmouse_disable(0);
@@ -1360,6 +1367,9 @@ void exit_inventory(bool shouldEnableIso)
 
     if (shouldEnableIso) {
         map_enable_bk_processes();
+    }
+    if (!inven_pauses.empty()) {
+        inven_pauses.pop_back();
     }
 
     win_delete(i_wid);

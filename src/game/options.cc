@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "game/art.h"
 #include "game/combat.h"
@@ -31,6 +32,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -333,6 +335,9 @@ static int music_volume;
 // 0x661F00
 static bool bk_enable;
 
+// Holds the world pause while the options screen is open.
+static std::optional<ModalPause> optn_pause;
+
 // 0x661F04
 static int prf_running;
 
@@ -539,6 +544,7 @@ static int OptnStart()
         return -1;
     }
 
+    optn_pause.emplace();
     bk_enable = map_disable_bk_processes();
 
     mouse_3d_was_on = gmouse_3d_is_on();
@@ -607,6 +613,7 @@ static int OptnEnd()
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    optn_pause.reset();
 
     return 0;
 }
@@ -626,8 +633,13 @@ int PauseWindow(bool is_world_map)
     CacheEntry* frmHandles[PAUSE_WINDOW_FRM_COUNT];
     Size frmSizes[PAUSE_WINDOW_FRM_COUNT];
 
+    // Released by the destructor on the error returns, which leave the
+    // processes disabled as before.
+    std::optional<ModalPause> pause;
+
     bool gameMouseWasVisible;
     if (!is_world_map) {
+        pause.emplace();
         bk_enable = map_disable_bk_processes();
         cycle_disable();
 
@@ -795,6 +807,7 @@ int PauseWindow(bool is_world_map)
         if (bk_enable) {
             map_enable_bk_processes();
         }
+        pause.reset();
 
         cycle_enable();
 

@@ -6,6 +6,7 @@ add_executable(fallout-runtime-tests
     "test_harness.h"
     "stubs.cc"
     "test_campaign_advance.cc"
+    "test_modal_pause.cc"
     "test_pause_set.cc"
     "test_pointer_registry.cc"
     "test_rect.cc"

@@ -29,6 +29,7 @@
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -1109,6 +1110,7 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                 // NOTE: Uninline.
                 if (gmouse_3d_set_flat_fid(fid, &v43) == 0 && gmouse_3d_move_to(mouseX, mouseY, map_elevation, &v43) == 0) {
                     tile_refresh_rect(&v43, map_elevation);
+                    ModalPause modalPause;
                     map_disable_bk_processes();
 
                     int v33 = mouseY;
@@ -1144,6 +1146,7 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                     }
 
                     map_enable_bk_processes();
+                    modalPause.release();
 
                     gmouse_3d_hover_test = false;
                     gmouse_3d_last_mouse_x = mouseX;

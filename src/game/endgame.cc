@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/bmpdlog.h"
 #include "game/credits.h"
 #include "game/cycle.h"
@@ -32,6 +34,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -142,6 +145,9 @@ static bool endgame_subtitle_done;
 
 // 0x56EEA8
 static bool endgame_map_enabled;
+
+// Holds the world pause while the ending slideshow runs.
+static std::optional<ModalPause> endgame_pause;
 
 // 0x56EEAC
 static bool endgame_mouse_state;
@@ -289,6 +295,9 @@ void endgame_slideshow()
         endgame_exit();
     }
 
+    // The error returns of endgame_init do not reach endgame_exit.
+    endgame_pause.reset();
+
     game_set_global_var(GVAR_CALM_REBELS_2, 0);
 
     svga_set_menu_zoom(false);
@@ -327,6 +336,7 @@ static int endgame_init()
 {
     gsound_background_stop();
 
+    endgame_pause.emplace();
     endgame_map_enabled = map_disable_bk_processes();
 
     cycle_disable();
@@ -439,6 +449,7 @@ static void endgame_exit()
     if (endgame_map_enabled) {
         map_enable_bk_processes();
     }
+    endgame_pause.reset();
 }
 
 // 0x438D14

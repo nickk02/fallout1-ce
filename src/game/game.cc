@@ -58,6 +58,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 #include "sim/world_sim.h"
 
 namespace fallout {
@@ -1156,6 +1157,7 @@ static void game_unload_info()
 // 0x43D130
 static void game_help()
 {
+    ModalPause modalPause;
     bool isoWasEnabled = map_disable_bk_processes();
     gmouse_3d_off();
 
@@ -1229,11 +1231,13 @@ static void game_help()
     if (isoWasEnabled) {
         map_enable_bk_processes();
     }
+    modalPause.release();
 }
 
 // 0x43D274
 int game_quit_with_confirm()
 {
+    ModalPause modalPause;
     bool isoWasEnabled = map_disable_bk_processes();
 
     bool gameMouseWasVisible;
@@ -1282,6 +1286,7 @@ int game_quit_with_confirm()
     if (isoWasEnabled) {
         map_enable_bk_processes();
     }
+    modalPause.release();
 
     return rc;
 }
