@@ -11,12 +11,11 @@
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/combatai.h"
-#include "game/damage_popup.h"
-#include "game/free_move.h"
-#include "game/soft_target.h"
 #include "game/critter.h"
+#include "game/damage_popup.h"
 #include "game/display.h"
 #include "game/elevator.h"
+#include "game/free_move.h"
 #include "game/game.h"
 #include "game/gconfig.h"
 #include "game/gmouse.h"
@@ -33,6 +32,7 @@
 #include "game/roll.h"
 #include "game/scripts.h"
 #include "game/skill.h"
+#include "game/soft_target.h"
 #include "game/stat.h"
 #include "game/stick_move.h"
 #include "game/tile.h"
@@ -48,6 +48,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -2200,6 +2201,9 @@ static unsigned int combat_realtime_queued_at = 0;
 static unsigned int combat_realtime_ap_tick = 0;
 static unsigned int combat_realtime_enemy_done = 0;
 
+// When the fight last looked for new creatures to act.
+static unsigned int combat_realtime_last_sequence = 0;
+
 // When the player last had a reason to fight: an enemy that sees the player, an
 // enemy acting, or the player attacking. A fight with none of those for a while
 // ends by itself.
@@ -2244,17 +2248,41 @@ static void combat_shift_timers(unsigned int delta)
 }
 
 // Stops the game for a screen that opens in the middle of a fight, such as the
-// inventory. Returns the time to hand back to `combat_freeze_end`.
-unsigned int combat_freeze_begin()
+// inventory. Hand the result back to `combat_freeze_end`.
+CombatFreeze combat_freeze_begin()
 {
-    anim_set_paused(true);
-    return get_time();
+    CombatFreeze freeze;
+    freeze.token = world_sim_pause();
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(true);
+    }
+    freeze.start = get_time();
+    return freeze;
 }
 
-void combat_freeze_end(unsigned int start)
+void combat_freeze_end(CombatFreeze& freeze)
 {
-    anim_set_paused(false);
-    combat_shift_timers(get_time() - start);
+    freeze.token.release();
+
+    // With owned pauses the last release thaws the animations and shifts the
+    // timers once, from the start of the outermost pause.
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(false);
+        combat_shift_timers(get_time() - freeze.start);
+    }
+}
+
+void combat_world_resumed(unsigned int elapsed)
+{
+    combat_shift_timers(elapsed);
+
+    // Two timers the turn-based pause code never moved. Left alone, the time
+    // spent paused would use up the player's window after an enemy action and
+    // trigger the next sequence (which advances the campaign clock) at once.
+    if (combat_realtime_enemy_done != 0) {
+        combat_realtime_enemy_done += elapsed;
+    }
+    combat_realtime_last_sequence += elapsed;
 }
 
 // Stops time. Every animation freezes, no creature acts, and no action points
@@ -2269,7 +2297,10 @@ static void combat_realtime_pause()
 
     combat_paused = true;
     gsound_play_sfx_file("icombat1");
-    anim_set_paused(true);
+    PauseToken pauseToken = world_sim_pause();
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(true);
+    }
     soft_target_set_wide(true);
     combat_pause_building.clear();
 
@@ -2295,11 +2326,16 @@ static void combat_realtime_pause()
     }
 
     soft_target_set_wide(false);
-    anim_set_paused(false);
+    pauseToken.release();
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(false);
+    }
     combat_paused = false;
     gsound_play_sfx_file("icombat2");
 
-    combat_shift_timers(get_time() - start);
+    if (!world_sim_owns_pauses()) {
+        combat_shift_timers(get_time() - start);
+    }
 
     combat_pause_running = combat_pause_building;
     combat_pause_building.clear();
@@ -2398,7 +2434,7 @@ static void combat_pause_fire_next()
 // the pause left shots lined up. Called every frame.
 void combat_vats_update()
 {
-    if (combat_paused) {
+    if (combat_paused || world_sim_world_paused()) {
         return;
     }
 
@@ -2473,6 +2509,13 @@ static int combat_realtime_pump()
     damage_popup_update();
 
     int input = get_input();
+
+    // get_input() blocks while the window is out of focus, and the pause shifted
+    // the timers by then. `now` has to be read again.
+    if (world_sim_owns_pauses()) {
+        now = get_time();
+    }
+
     camera_follow_update();
 
     // The attack queued while an animation was still running goes out as soon
@@ -2519,7 +2562,7 @@ static void combat_realtime_loop()
 
     unsigned int now = get_time();
     combat_realtime_ap_tick = now;
-    unsigned int lastSequence = now;
+    combat_realtime_last_sequence = now;
 
     // The attack that started the fight goes out right away.
     if (gcsd != NULL) {
@@ -2563,8 +2606,8 @@ static void combat_realtime_loop()
         // shots lined up in the pause go out.
         if (combat_turn_running == 0 && combat_pause_running.empty() && combat_realtime_queued_attack == NULL
             && get_time() - combat_realtime_enemy_done >= REALTIME_PLAYER_WINDOW) {
-            if (now - lastSequence >= REALTIME_SEQUENCE_INTERVAL) {
-                lastSequence = now;
+            if (now - combat_realtime_last_sequence >= REALTIME_SEQUENCE_INTERVAL) {
+                combat_realtime_last_sequence = now;
                 combat_sequence();
 
                 // Any enemy that still perceives the player keeps the fight on.
@@ -2628,7 +2671,6 @@ static void combat_realtime_loop()
 
         renderPresent();
         sharedFpsLimiter.throttle();
-
     }
     combat_realtime_active = false;
     combat_pause_running.clear();
@@ -2940,30 +2982,30 @@ void combat(STRUCT_664980* attack)
         if (combat_realtime && v3 == 0) {
             combat_realtime_loop();
         } else
-        do {
-            if (v6 == -1) {
-                break;
-            }
-
-            for (; v6 < list_com; v6++) {
-                if (combat_turn(combat_list[v6], false) == -1) {
+            do {
+                if (v6 == -1) {
                     break;
                 }
 
-                if (combat_ending_guy != NULL) {
+                for (; v6 < list_com; v6++) {
+                    if (combat_turn(combat_list[v6], false) == -1) {
+                        break;
+                    }
+
+                    if (combat_ending_guy != NULL) {
+                        break;
+                    }
+
+                    gcsd = NULL;
+                }
+
+                if (v6 < list_com) {
                     break;
                 }
 
-                gcsd = NULL;
-            }
-
-            if (v6 < list_com) {
-                break;
-            }
-
-            combat_sequence();
-            v6 = 0;
-        } while (!combat_should_end());
+                combat_sequence();
+                v6 = 0;
+            } while (!combat_should_end());
 
         if (combat_end_due_to_load) {
             game_ui_enable();
@@ -5140,7 +5182,6 @@ static void combat_attack_this_now(Object* a1)
         }
         return;
     }
-
 
     // Face the target first. A swing that starts while the player still looks
     // the other way would punch the air.

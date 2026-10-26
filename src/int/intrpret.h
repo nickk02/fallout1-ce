@@ -211,6 +211,8 @@ void interpretAddFunc(int opcode, OpcodeHandler* handler);
 void interpretSetFilenameFunc(InterpretMangleFunc* func);
 void interpretSuspendEvents();
 void interpretResumeEvents();
+void interpretShiftWaits(unsigned int elapsed);
+void interpretRestartSuspension();
 int interpretSaveProgramState();
 int interpretLoadProgramState();
 

@@ -357,6 +357,14 @@ int text_object_count()
     return text_object_index;
 }
 
+// Gives every floating text back the time a pause took.
+void text_object_shift_times(unsigned int elapsed)
+{
+    for (int index = 0; index < text_object_index; index++) {
+        text_object_list[index]->time += elapsed;
+    }
+}
+
 // 0x49D440
 static void text_object_bk()
 {

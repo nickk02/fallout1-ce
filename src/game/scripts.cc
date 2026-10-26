@@ -30,6 +30,8 @@
 #include "plib/gnw/input.h"
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
+#include "sim/timed_events.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -566,15 +568,22 @@ static void doBkProcesses()
 
         // NOTE: There is a loop at 0x4A3C64, consisting of one iteration, going
         // downwards from 1.
-        for (int index = 0; index < 1; index++) {
-            updatePrograms();
+        //
+        // While an owned pause is held the background pass leaves the programs
+        // alone: their timers stand still (see sim_service) and nothing in the
+        // world moves. A dialog opened from inside the pause needs them, and the
+        // direct updatePrograms() calls elsewhere are not affected.
+        if (!world_sim_world_paused() || dialog_active()) {
+            for (int index = 0; index < 1; index++) {
+                updatePrograms();
+            }
         }
     }
 
     updateWindows();
 
     if (script_engine_running && script_engine_run_critters) {
-        if (!dialog_active()) {
+        if (!dialog_active() && !world_sim_world_paused()) {
             script_chk_critters();
             script_chk_timed_events();
         }
@@ -625,17 +634,21 @@ static void script_chk_critters()
     }
 }
 
+// 0x51C7E0, 0x51C7E4
+static TimedEventClock script_timed_events;
+
+// Starts the timed events over from `now`, the current time. Used when an owned
+// pause ends, so the time spent paused does not come due all at once.
+void scr_rebase_timed_events(unsigned int now)
+{
+    script_timed_events.rebase(now);
+}
+
 // TODO: Check.
 //
 // 0x49207C
 static void script_chk_timed_events()
 {
-    // 0x51C7E0
-    static int last_time = 0;
-
-    // 0x51C7E4
-    static int last_light_time = 0;
-
     int now;
     bool should_process_queue;
 
@@ -647,18 +660,17 @@ static void script_chk_timed_events()
     }
 
     if (game_state() != GAME_STATE_4) {
-        if (elapsed_tocks(now, last_light_time) >= 30000) {
-            last_light_time = now;
+        if (script_timed_events.lightUpdateDue(now)) {
             scr_exec_map_update_scripts();
         }
     } else {
         should_process_queue = false;
     }
 
-    if (elapsed_tocks(now, last_time) >= 100) {
-        last_time = now;
+    if (script_timed_events.secondTickDue(now)) {
         if (!isInCombat()) {
             fallout_game_time += 1;
+            world_sim_note_legacy_calendar_tick();
         }
         should_process_queue = true;
     }

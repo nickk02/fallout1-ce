@@ -492,7 +492,6 @@ static void controller_handle_button(SDL_GameControllerButton button)
             input_inject_key(SDL_SCANCODE_E);
             return;
         }
-
     }
 
     // Screens that run their own loop: B and Start go back.

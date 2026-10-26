@@ -15,6 +15,7 @@
 #include "plib/db/db.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
+#include "sim/procedure_table.h"
 
 namespace fallout {
 
@@ -3063,32 +3064,46 @@ void interpretSuspendEvents()
     }
 }
 
+// Moves the end of every program's wait() forward, for a pause that stopped the
+// clock the wait counts against. Waits on other conditions are left alone.
+void interpretShiftWaits(unsigned int elapsed)
+{
+    unsigned int shift = interpreter_units(elapsed, timerTick);
+    for (ProgramListNode* node = head; node != NULL; node = node->next) {
+        Program* program = node->program;
+        if ((program->flags & PROGRAM_IS_WAITING) != 0 && program->checkWaitFunc == checkWait) {
+            program->waitStart += shift;
+            program->waitEnd += shift;
+        }
+    }
+}
+
+// Restarts the clock of a suspension in progress, for a pause whose start moved
+// (a load inside it). Programs made after the load must not be shifted by the
+// time before it.
+void interpretRestartSuspension()
+{
+    if (suspendEvents != 0) {
+        suspendTime = timerFunc();
+    }
+}
+
 // 0x4620FC
 void interpretResumeEvents()
 {
     int counter;
     ProgramListNode* programListNode;
     unsigned int time;
-    int procedureCount;
-    int procedureIndex;
-    unsigned char* procedurePtr;
 
     counter = suspendEvents;
     if (suspendEvents != 0) {
         suspendEvents--;
         if (counter == 1) {
             programListNode = head;
-            time = 1000 * (timerFunc() - suspendTime) / timerTick;
+            time = interpreter_units(timerFunc() - suspendTime, timerTick);
             while (programListNode != NULL) {
-                procedureCount = fetchLong(programListNode->program->procedures, 0);
-                procedurePtr = programListNode->program->procedures + 4;
-                for (procedureIndex = 0; procedureIndex < procedureCount; procedureIndex++) {
-                    if ((fetchLong(procedurePtr, 4) & PROCEDURE_FLAG_TIMED) != 0) {
-                        storeLong(fetchLong(procedurePtr, 8) + time, procedurePtr, 8);
-                    }
-                }
+                procedure_table_shift_timed(programListNode->program->procedures, sizeof(Procedure), PROCEDURE_FLAG_TIMED, time);
                 programListNode = programListNode->next;
-                procedurePtr += sizeof(Procedure);
             }
         }
     }

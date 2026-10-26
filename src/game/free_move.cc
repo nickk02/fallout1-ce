@@ -215,6 +215,12 @@ void free_move_goto(int tile, bool running)
     gotoBestAt = get_time();
 }
 
+void free_move_world_resumed(unsigned int elapsed)
+{
+    // The "no progress" timer must not count the pause.
+    gotoBestAt += elapsed;
+}
+
 bool free_move_goto_active()
 {
     return gotoTile != -1;

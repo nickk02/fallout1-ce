@@ -8,6 +8,7 @@
 #include "game/party.h"
 #include "game/proto_types.h"
 #include "plib/db/db.h"
+#include "sim/pause_set.h"
 
 namespace fallout {
 
@@ -70,9 +71,20 @@ void combat_set_realtime(bool enabled);
 void combat_vats_update();
 void combat_vats_pause();
 
-// Real-time fights stop while a full screen such as the inventory is open.
-unsigned int combat_freeze_begin();
-void combat_freeze_end(unsigned int start);
+// Real-time fights stop while a full screen such as the inventory is open. The
+// freeze holds its own claim on the world pause, so it can open inside the
+// combat pause and close again without ending it.
+struct CombatFreeze {
+    unsigned int start = 0;
+    PauseToken token;
+};
+
+CombatFreeze combat_freeze_begin();
+void combat_freeze_end(CombatFreeze& freeze);
+
+// Moves the combat timers forward by the length of a pause that just ended. Only
+// used when the pause set owns pausing (WORLD_SIM=2).
+void combat_world_resumed(unsigned int elapsed);
 
 static inline bool isInCombat()
 {

@@ -138,6 +138,7 @@ char* game_time_hour_str();
 void inc_game_time(int inc);
 void inc_game_time_in_seconds(int inc);
 void set_game_time(int time);
+void scr_rebase_timed_events(unsigned int now);
 void set_game_time_in_seconds(int time);
 int gtime_q_add();
 int gtime_q_process(Object* obj, void* data);

@@ -12,6 +12,9 @@ bool free_move_step(float dirX, float dirY, bool running, float elapsed);
 // Stops walking and returns to the standing pose.
 void free_move_stop();
 
+// A pause of `elapsed` ms just ended. Moves the timers of a walk in progress.
+void free_move_world_resumed(unsigned int elapsed);
+
 // Walks toward `tile` the way the keys do: a click on the ground. The walk ends
 // on arrival, when the way is blocked for a moment, or when anything calls
 // `free_move_stop` or `free_move_goto_cancel`.
