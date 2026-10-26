@@ -21,16 +21,16 @@ void report_failure(const char* file, int line, const char* expression);
 
 } // namespace fallout_test
 
-#define TEST(name)                                                              \
-    static void name();                                                         \
+#define TEST(name)                                                                  \
+    static void name();                                                             \
     static const bool name##_registered = fallout_test::register_test(#name, name); \
     static void name()
 
-#define CHECK(expression)                                                 \
-    do {                                                                  \
-        if (!(expression)) {                                              \
+#define CHECK(expression)                                                  \
+    do {                                                                   \
+        if (!(expression)) {                                               \
             fallout_test::report_failure(__FILE__, __LINE__, #expression); \
-        }                                                                 \
+        }                                                                  \
     } while (0)
 
 #define CHECK_EQ(actual, expected) CHECK((actual) == (expected))

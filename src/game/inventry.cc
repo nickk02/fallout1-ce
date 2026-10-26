@@ -39,11 +39,11 @@
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
 #include "plib/gnw/controller.h"
-#include "plib/gnw/menu_focus.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/input.h"
+#include "plib/gnw/menu_focus.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
 

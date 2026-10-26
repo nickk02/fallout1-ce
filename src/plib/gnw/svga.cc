@@ -540,7 +540,6 @@ void svga_menu_zoom_area(int* left, int* top, int* right, int* bottom)
 static bool gFocusRectSet = false;
 static SDL_Rect gFocusRect;
 
-
 void svga_set_focus_rect(const Rect* rect)
 {
     if (rect == NULL) {

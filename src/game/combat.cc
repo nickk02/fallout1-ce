@@ -11,12 +11,11 @@
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/combatai.h"
-#include "game/damage_popup.h"
-#include "game/free_move.h"
-#include "game/soft_target.h"
 #include "game/critter.h"
+#include "game/damage_popup.h"
 #include "game/display.h"
 #include "game/elevator.h"
+#include "game/free_move.h"
 #include "game/game.h"
 #include "game/gconfig.h"
 #include "game/gmouse.h"
@@ -33,6 +32,7 @@
 #include "game/roll.h"
 #include "game/scripts.h"
 #include "game/skill.h"
+#include "game/soft_target.h"
 #include "game/stat.h"
 #include "game/stick_move.h"
 #include "game/tile.h"
@@ -2628,7 +2628,6 @@ static void combat_realtime_loop()
 
         renderPresent();
         sharedFpsLimiter.throttle();
-
     }
     combat_realtime_active = false;
     combat_pause_running.clear();
@@ -2940,30 +2939,30 @@ void combat(STRUCT_664980* attack)
         if (combat_realtime && v3 == 0) {
             combat_realtime_loop();
         } else
-        do {
-            if (v6 == -1) {
-                break;
-            }
-
-            for (; v6 < list_com; v6++) {
-                if (combat_turn(combat_list[v6], false) == -1) {
+            do {
+                if (v6 == -1) {
                     break;
                 }
 
-                if (combat_ending_guy != NULL) {
+                for (; v6 < list_com; v6++) {
+                    if (combat_turn(combat_list[v6], false) == -1) {
+                        break;
+                    }
+
+                    if (combat_ending_guy != NULL) {
+                        break;
+                    }
+
+                    gcsd = NULL;
+                }
+
+                if (v6 < list_com) {
                     break;
                 }
 
-                gcsd = NULL;
-            }
-
-            if (v6 < list_com) {
-                break;
-            }
-
-            combat_sequence();
-            v6 = 0;
-        } while (!combat_should_end());
+                combat_sequence();
+                v6 = 0;
+            } while (!combat_should_end());
 
         if (combat_end_due_to_load) {
             game_ui_enable();
@@ -5140,7 +5139,6 @@ static void combat_attack_this_now(Object* a1)
         }
         return;
     }
-
 
     // Face the target first. A swing that starts while the player still looks
     // the other way would punch the air.
