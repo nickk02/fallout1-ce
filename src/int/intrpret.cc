@@ -170,6 +170,15 @@ static unsigned int defaultTimerFunc()
     return get_time();
 }
 
+// The interpreter's absolute time: the timer in milliseconds. Every wait, timed
+// procedure and event deadline is in these units. The conversion is done in 64
+// bits: 1000 * the timer wrapped in 32 bits after about 71.6 minutes, which
+// made deadlines meaningless from then on.
+static unsigned int interpreterNow()
+{
+    return interpreter_units(timerFunc(), timerTick);
+}
+
 // 0x45B408
 void interpretSetTimeFunc(InterpretTimerFunc* timerFunc, int timerTick)
 {
@@ -198,7 +207,7 @@ static int outputStr(char* string)
 // 0x45B428
 static int checkWait(Program* program)
 {
-    return 1000 * timerFunc() / timerTick <= program->waitEnd;
+    return interpreterNow() <= program->waitEnd;
 }
 
 // 0x45B45C
@@ -653,7 +662,7 @@ static void op_call_at(Program* program)
 
     unsigned char* procedure_ptr = program->procedures + 4 + sizeof(Procedure) * data[0];
 
-    int delay = 1000 * data[1] + 1000 * timerFunc() / timerTick;
+    int delay = 1000 * data[1] + interpreterNow();
     int flags = fetchLong(procedure_ptr, 4);
 
     storeLong(delay, procedure_ptr, 8);
@@ -681,7 +690,7 @@ static void op_wait(Program* program)
 {
     int data = programStackPopInteger(program);
 
-    program->waitStart = 1000 * timerFunc() / timerTick;
+    program->waitStart = interpreterNow();
     program->waitEnd = program->waitStart + data;
     program->checkWaitFunc = checkWait;
     program->flags |= PROGRAM_IS_WAITING;
@@ -2556,7 +2565,7 @@ void interpret(Program* program, int a2)
     }
 
     if (program->field_78 == -1) {
-        program->field_78 = 1000 * timerFunc() / timerTick;
+        program->field_78 = interpreterNow();
     }
 
     currentProgram = program;
@@ -2831,7 +2840,7 @@ static void doEvents()
     }
 
     programListNode = head;
-    time = 1000 * timerFunc() / timerTick;
+    time = interpreterNow();
 
     while (programListNode != NULL) {
         procedureCount = fetchLong(programListNode->program->procedures, 0);

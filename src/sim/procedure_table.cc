@@ -38,13 +38,13 @@ void procedure_table_shift_timed(unsigned char* table, size_t entrySize, uint32_
     }
 }
 
-uint32_t interpreter_units(uint32_t duration, int tick)
+uint32_t interpreter_units(uint32_t duration, uint32_t tick)
 {
-    if (tick <= 0) {
+    if (tick == 0) {
         return duration;
     }
 
-    return static_cast<uint32_t>(static_cast<uint64_t>(duration) * 1000 / static_cast<uint64_t>(tick));
+    return static_cast<uint32_t>(static_cast<uint64_t>(duration) * 1000 / tick);
 }
 
 } // namespace fallout

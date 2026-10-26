@@ -15,10 +15,12 @@ namespace fallout {
 // like the interpreter's own clock.
 void procedure_table_shift_timed(unsigned char* table, size_t entrySize, uint32_t timedFlag, uint32_t delta);
 
-// Converts a duration in timer ticks to the interpreter's millisecond units:
-// duration * 1000 / tick, computed in 64 bits so a long duration does not wrap
-// before the division. A zero `tick` returns the duration unchanged.
-uint32_t interpreter_units(uint32_t duration, int tick);
+// Converts a timer reading or a duration in timer ticks to the interpreter's
+// millisecond units: value * 1000 / tick, computed in 64 bits so that a long
+// duration, or a reading after about 71.6 minutes of uptime, does not wrap
+// before the division. The result is cut to 32 bits like every interpreter
+// time. A zero `tick` returns the value unchanged.
+uint32_t interpreter_units(uint32_t duration, uint32_t tick);
 
 } // namespace fallout
 

@@ -175,5 +175,93 @@ TEST(interpreter_units_scales_without_wrapping)
     CHECK_EQ(interpreter_units(100, 2000), 50u);
 
     // No usable tick: the duration is returned as it is.
-    CHECK_EQ(interpreter_units(77, 0), 77u);
+    CHECK_EQ(interpreter_units(77, 0u), 77u);
+}
+
+namespace {
+
+// The conversion the interpreter used before: 1000 * timer in 32 bits.
+uint32_t legacyUnits(uint32_t timer, uint32_t tick)
+{
+    return 1000u * timer / tick;
+}
+
+// 2^32 / 1000 ms, rounded up: the first timer reading where the old product
+// wraps. About 71.6 minutes.
+const uint32_t kWrapReading = 4294968;
+
+// The test checkWait() makes: a wait is over once the time passes its end.
+bool stillWaiting(uint32_t now, uint32_t waitEnd)
+{
+    return now <= waitEnd;
+}
+
+} // namespace
+
+TEST(interpreter_units_matches_the_old_conversion_before_the_wrap)
+{
+    uint32_t readings[] = { 0, 1, 999, 1000, 60000, 3600000, kWrapReading - 1 };
+    for (uint32_t reading : readings) {
+        CHECK_EQ(interpreter_units(reading, 1000), legacyUnits(reading, 1000));
+        CHECK_EQ(interpreter_units(reading, 1000), reading);
+    }
+}
+
+TEST(interpreter_units_stays_in_step_with_the_timer_past_71_minutes)
+{
+    // The old product wrapped here, and the old value jumped back.
+    CHECK(legacyUnits(kWrapReading, 1000) != kWrapReading);
+    CHECK(legacyUnits(kWrapReading, 1000) < legacyUnits(kWrapReading - 1, 1000));
+
+    for (uint32_t reading = kWrapReading - 5; reading < kWrapReading + 5; reading++) {
+        CHECK_EQ(interpreter_units(reading, 1000), reading);
+    }
+
+    // Two hours and a day.
+    CHECK_EQ(interpreter_units(7200000, 1000), 7200000u);
+    CHECK_EQ(interpreter_units(86400000, 1000), 86400000u);
+}
+
+TEST(interpreter_wait_started_before_the_wrap_ends_on_time)
+{
+    // wait(500) called 200 ms before the old product wrapped.
+    uint32_t start = interpreter_units(kWrapReading - 200, 1000);
+    uint32_t waitEnd = start + 500;
+
+    CHECK(stillWaiting(interpreter_units(kWrapReading - 200, 1000), waitEnd));
+    CHECK(stillWaiting(interpreter_units(kWrapReading, 1000), waitEnd));
+    CHECK(stillWaiting(interpreter_units(kWrapReading + 299, 1000), waitEnd));
+    CHECK(!stillWaiting(interpreter_units(kWrapReading + 301, 1000), waitEnd));
+
+    // With the old units the clock jumped back to about zero at the wrap, so the
+    // wait would not have ended until the reading caught up again: more than 70
+    // minutes.
+    uint32_t oldEnd = legacyUnits(kWrapReading - 200, 1000) + 500;
+    CHECK(stillWaiting(legacyUnits(kWrapReading + 301, 1000), oldEnd));
+    CHECK(stillWaiting(legacyUnits(kWrapReading + 5000, 1000), oldEnd));
+}
+
+TEST(interpreter_wait_started_after_the_wrap_lasts_its_full_time)
+{
+    uint32_t start = interpreter_units(kWrapReading + 1000, 1000);
+    uint32_t waitEnd = start + 2000;
+
+    CHECK(stillWaiting(interpreter_units(kWrapReading + 2999, 1000), waitEnd));
+    CHECK(!stillWaiting(interpreter_units(kWrapReading + 3001, 1000), waitEnd));
+}
+
+TEST(interpreter_timed_deadline_set_across_the_wrap_fires_once_when_due)
+{
+    // doEvents() fires a timed procedure once its deadline is below the time.
+    uint32_t deadline = interpreter_units(kWrapReading - 100, 1000) + 1000;
+
+    CHECK(!(deadline < interpreter_units(kWrapReading - 100, 1000)));
+    CHECK(!(deadline < interpreter_units(kWrapReading + 500, 1000)));
+    CHECK(deadline < interpreter_units(kWrapReading + 901, 1000));
+}
+
+TEST(interpreter_units_scales_other_ticks_past_the_wrap)
+{
+    // A timer in 1/100 s: 5,000,000 ticks is 50,000,000 ms.
+    CHECK_EQ(interpreter_units(5000000, 100), 50000000u);
 }
