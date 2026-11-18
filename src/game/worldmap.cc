@@ -999,7 +999,7 @@ int world_map(WorldMapContext ctx)
     text = getmsg(&map_msg_file, &mesg, 1000);
     body[0] = text;
 
-    if (map_save_in_game(true) == -1) {
+    if (map_save_in_game(true) != 0) {
         debug_printf("\nWORLD MAP: ** Error saving map! **\n");
         gmouse_disable(0);
         gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -2573,7 +2573,7 @@ static int LoadTownMap(const char* filename, int map_idx)
     // subsequent `map_load` wants filename to be mutable.
     strcpy(filename_copy, filename);
 
-    if (map_load(filename_copy) == -1) {
+    if (map_load(filename_copy) != 0) {
         debug_printf("\nWORLD MAP: ** Error loading town map! **\n");
         return -1;
     }
@@ -3124,7 +3124,7 @@ WorldMapContext town_map(WorldMapContext ctx)
     text = getmsg(&map_msg_file, &mesg, 1000);
     body[0] = text;
 
-    if (map_save_in_game(true) == -1) {
+    if (map_save_in_game(true) != 0) {
         debug_printf("\nWORLD MAP: ** Error saving map! **\n");
         gmouse_disable(0);
         gmouse_set_cursor(1);

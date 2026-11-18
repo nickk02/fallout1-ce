@@ -51,6 +51,34 @@ CampaignAdvanceResult advanceCampaignTime(CampaignQueue& queue, uint32_t target,
     }
 }
 
+CampaignAdvanceResult drainDueEvents(CampaignQueue& queue, const CampaignAdvanceOptions& options)
+{
+    CampaignAdvanceResult result;
+
+    while (true) {
+        if (options.shouldStop && options.shouldStop()) {
+            result.status = CampaignAdvanceStatus::Stopped;
+            return result;
+        }
+
+        uint32_t next;
+        if (!queue.nextEventTime(&next) || next > queue.gameTime()) {
+            return result;
+        }
+
+        if (result.events >= options.maxEvents) {
+            result.status = CampaignAdvanceStatus::NoProgress;
+            return result;
+        }
+
+        result.events++;
+        if (queue.processNext() != 0) {
+            result.status = CampaignAdvanceStatus::Interrupted;
+            return result;
+        }
+    }
+}
+
 CampaignAdvanceResult advanceCampaignBy(CampaignQueue& queue, uint32_t delta, const CampaignAdvanceOptions& options)
 {
     uint32_t now = queue.gameTime();

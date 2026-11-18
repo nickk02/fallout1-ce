@@ -429,3 +429,113 @@ TEST(campaign_advance_by_reports_overflow_and_changes_nothing)
     CHECK(advanceCampaignBy(queue, 5).status == CampaignAdvanceStatus::Reached);
     CHECK_EQ(queue.gameTime(), UINT32_MAX);
 }
+
+TEST(drain_runs_every_due_event_and_leaves_the_time_alone)
+{
+    FakeQueue queue(100);
+    int ran = 0;
+    queue.add(50, [&](FakeQueue&) { ran++; return 0; });
+    queue.add(100, [&](FakeQueue&) { ran++; return 0; });
+    queue.add(101, [&](FakeQueue&) { ran++; return 0; });
+
+    CampaignAdvanceResult result = drainDueEvents(queue);
+
+    CHECK(result.status == CampaignAdvanceStatus::Reached);
+    CHECK_EQ(result.events, 2u);
+    CHECK_EQ(ran, 2);
+    CHECK_EQ(queue.gameTime(), 100u);
+    CHECK_EQ(queue.pending(), 1u);
+}
+
+TEST(drain_on_an_empty_queue_or_with_nothing_due_does_nothing)
+{
+    FakeQueue empty(5);
+    CHECK(drainDueEvents(empty).status == CampaignAdvanceStatus::Reached);
+    CHECK_EQ(empty.processCalls(), 0);
+
+    FakeQueue later(5);
+    later.add(6, [](FakeQueue&) { return 0; });
+    CampaignAdvanceResult result = drainDueEvents(later);
+    CHECK(result.status == CampaignAdvanceStatus::Reached);
+    CHECK_EQ(result.events, 0u);
+    CHECK_EQ(later.processCalls(), 0);
+}
+
+TEST(drain_runs_events_that_handlers_schedule_for_the_current_time)
+{
+    FakeQueue queue(10);
+    int ran = 0;
+    queue.add(10, [&](FakeQueue& q) {
+        ran++;
+        q.add(10, [&](FakeQueue&) { ran++; return 0; });
+        q.add(11, [&](FakeQueue&) { ran += 100; return 0; });
+        return 0;
+    });
+
+    CampaignAdvanceResult result = drainDueEvents(queue);
+    CHECK_EQ(ran, 2);
+    CHECK_EQ(result.events, 2u);
+    CHECK_EQ(queue.pending(), 1u);
+}
+
+TEST(drain_stops_after_a_nonzero_result_and_keeps_the_rest)
+{
+    FakeQueue queue(10);
+    queue.add(1, [](FakeQueue&) { return 3; });
+    queue.add(2, [](FakeQueue&) { return 0; });
+
+    CampaignAdvanceResult result = drainDueEvents(queue);
+    CHECK(result.status == CampaignAdvanceStatus::Interrupted);
+    CHECK_EQ(result.events, 1u);
+    CHECK_EQ(queue.pending(), 1u);
+}
+
+TEST(drain_event_limit_ends_with_no_progress_and_keeps_the_rest)
+{
+    FakeQueue queue(10);
+    for (int i = 0; i < 5; i++) {
+        queue.add(10, [](FakeQueue&) { return 0; });
+    }
+
+    CampaignAdvanceOptions options;
+    options.maxEvents = 3;
+    CampaignAdvanceResult result = drainDueEvents(queue, options);
+    CHECK(result.status == CampaignAdvanceStatus::NoProgress);
+    CHECK_EQ(result.events, 3u);
+    CHECK_EQ(queue.pending(), 2u);
+}
+
+TEST(drain_checks_the_stop_request_before_every_event_including_after_a_handler)
+{
+    FakeQueue queue(10);
+    bool stop = false;
+    int ran = 0;
+    queue.add(1, [&](FakeQueue&) { ran++; stop = true; return 0; });
+    queue.add(2, [&](FakeQueue&) { ran++; return 0; });
+
+    CampaignAdvanceOptions options;
+    options.shouldStop = [&] { return stop; };
+    CampaignAdvanceResult result = drainDueEvents(queue, options);
+
+    CHECK(result.status == CampaignAdvanceStatus::Stopped);
+    CHECK_EQ(ran, 1);
+
+    // A request that is set first runs nothing.
+    FakeQueue other(10);
+    other.add(1, [](FakeQueue&) { return 0; });
+    stop = true;
+    CHECK(drainDueEvents(other, options).status == CampaignAdvanceStatus::Stopped);
+    CHECK_EQ(other.processCalls(), 0);
+}
+
+TEST(advance_campaign_time_still_skips_due_events_when_the_target_is_not_ahead)
+{
+    // The drain is a separate function. advanceCampaignTime keeps its early
+    // return.
+    FakeQueue queue(100);
+    queue.add(50, [](FakeQueue&) { return 0; });
+
+    CampaignAdvanceResult result = advanceCampaignTime(queue, 100);
+    CHECK_EQ(result.events, 0u);
+    CHECK_EQ(queue.pending(), 1u);
+}

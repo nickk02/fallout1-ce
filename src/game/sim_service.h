@@ -11,6 +11,10 @@ void sim_service_init(int mode);
 // Call before the input system is torn down.
 void sim_service_exit();
 
+// Writes one diagnostic line to stderr when FALLOUT_ME_SIMLOG is set. Does
+// nothing otherwise.
+void sim_service_note(const char* line);
+
 } // namespace fallout
 
 #endif /* FALLOUT_GAME_SIM_SERVICE_H_ */

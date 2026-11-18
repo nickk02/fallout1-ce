@@ -1,8 +1,10 @@
 #include "sim/world_sim.h"
 
+#include <memory>
 #include <stdio.h>
 
 #include "sim/sim_clock.h"
+#include "sim/sim_log.h"
 
 namespace fallout {
 
@@ -22,13 +24,52 @@ namespace {
         uint64_t legacyCalendarTicks = 0;
     };
 
-    State* state = nullptr;
+    std::shared_ptr<State> state;
+    bool pumping = false;
     bool initialized = false;
     int mode = WORLD_SIM_EXISTING;
+
+    // Lives as long as the process, outside State, so that it survives the
+    // State being deleted and made again.
+    uint64_t epoch = 0;
 
     // The focus callback that was installed before ours. It survives world_sim_exit()
     // when ours could not be taken out, so the chain is not broken.
     WorldSimFocusFunction* chainedFocus = nullptr;
+
+    // Diagnostic line buffer size. The formatters truncate.
+    const size_t kEventLineSize = 192;
+
+    // Set while platform.event or platform.describe runs. Those callbacks may
+    // only format and write. The calls that change the lifecycle are refused
+    // meanwhile, so a sink cannot free the state under the caller.
+    bool delivering = false;
+
+    class DeliveryScope {
+    public:
+        DeliveryScope() { delivering = true; }
+        ~DeliveryScope() { delivering = false; }
+
+        DeliveryScope(const DeliveryScope&) = delete;
+        DeliveryScope& operator=(const DeliveryScope&) = delete;
+    };
+
+    void deliverEvent(const char* line)
+    {
+        DeliveryScope scope;
+        state->platform.event(line);
+    }
+
+    void emitLifecycle(const char* what)
+    {
+        if (state == nullptr || state->platform.event == nullptr) {
+            return;
+        }
+
+        char line[kEventLineSize];
+        sim_log_format_lifecycle(line, sizeof(line), what, epoch, state->ticks, state->pauses.isPaused());
+        deliverEvent(line);
+    }
 
     void onPauseChanged(bool paused)
     {
@@ -38,35 +79,80 @@ namespace {
 
         if (paused) {
             state->pauseStart = state->platform.now();
+            if (state->platform.event != nullptr) {
+                char line[kEventLineSize];
+                sim_log_format_pause(line, sizeof(line), true, epoch, state->ticks, 0);
+                deliverEvent(line);
+            }
             state->platform.setWorldPaused(true);
         } else {
             unsigned int now = state->platform.now();
             unsigned int elapsed = now - state->pauseStart;
+            if (state->platform.event != nullptr) {
+                char line[kEventLineSize];
+                sim_log_format_pause(line, sizeof(line), false, epoch, state->ticks, elapsed);
+                deliverEvent(line);
+            }
             state->platform.setWorldPaused(false);
             state->platform.shiftTimers(elapsed, now);
         }
     }
 
-    void onTick()
+    void onTick(const std::shared_ptr<State>& pass, uint64_t passEpoch)
     {
-        state->ticks++;
+        pass->ticks++;
+        if (pass->mode == WORLD_SIM_OWNED && pass->platform.gameplayTick != nullptr) {
+            pass->platform.gameplayTick();
+        }
+        // The callback may replace the service, reset, or invalidate its map.
+        // Stop the old clock before returning to advance(), which still holds
+        // the old pause set. The pump pins both until advance() returns.
+        if (state != pass || epoch != passEpoch) {
+            pass->clock.reset();
+            return;
+        }
 
-        if (state->platform.log != nullptr && state->ticks % kShadowLogInterval == 0) {
+        if (pass->platform.log != nullptr && pass->ticks % kShadowLogInterval == 0) {
             char text[128];
             snprintf(text, sizeof(text), "WORLD_SIM: %llu sim ticks, %llu legacy calendar ticks\n",
-                static_cast<unsigned long long>(state->ticks),
-                static_cast<unsigned long long>(state->legacyCalendarTicks));
-            state->platform.log(text);
+                static_cast<unsigned long long>(pass->ticks),
+                static_cast<unsigned long long>(pass->legacyCalendarTicks));
+            pass->platform.log(text);
+            if (state != pass || epoch != passEpoch) {
+                pass->clock.reset();
+                return;
+            }
+        }
+
+        if (pass->platform.event != nullptr && pass->ticks % kShadowLogInterval == 0) {
+            char detail[kEventLineSize];
+            detail[0] = '\0';
+            if (pass->platform.describe != nullptr) {
+                DeliveryScope scope;
+                pass->platform.describe(detail, sizeof(detail));
+            }
+
+            char line[kEventLineSize];
+            sim_log_format_summary(line, sizeof(line), pass->mode, epoch, pass->ticks, pass->legacyCalendarTicks, detail);
+            deliverEvent(line);
         }
     }
 
     void pump()
     {
-        if (state == nullptr) {
+        if (state == nullptr || pumping || delivering) return;
+        pumping = true;
+        struct PumpGuard {
+            ~PumpGuard() { pumping = false; }
+        } guard;
+        const auto pass = state;
+        const uint64_t passEpoch = epoch;
+        const unsigned int now = pass->platform.now();
+        if (state != pass || epoch != passEpoch) {
+            pass->clock.reset();
             return;
         }
-
-        state->clock.advance(state->platform.now(), &state->pauses, onTick);
+        pass->clock.advance(now, &pass->pauses, [&] { onTick(pass, passEpoch); });
     }
 
     void onFocus(int gained)
@@ -106,7 +192,7 @@ namespace {
 
 bool world_sim_init(int requestedMode, const WorldSimPlatform& platform)
 {
-    if (initialized) {
+    if (delivering || initialized) {
         return false;
     }
 
@@ -117,6 +203,7 @@ bool world_sim_init(int requestedMode, const WorldSimPlatform& platform)
     if (requestedMode == WORLD_SIM_EXISTING) {
         initialized = true;
         mode = WORLD_SIM_EXISTING;
+        epoch++;
         return true;
     }
 
@@ -124,7 +211,7 @@ bool world_sim_init(int requestedMode, const WorldSimPlatform& platform)
         return false;
     }
 
-    state = new State();
+    state = std::make_shared<State>();
     state->mode = requestedMode;
     state->platform = platform;
     state->pauses.setListener(onPauseChanged);
@@ -135,17 +222,25 @@ bool world_sim_init(int requestedMode, const WorldSimPlatform& platform)
 
     initialized = true;
     mode = requestedMode;
+    epoch++;
+    emitLifecycle("init");
     return true;
 }
 
 void world_sim_exit()
 {
-    if (!initialized) {
+    if (delivering || !initialized) {
         return;
     }
 
+    // Anything that kept the epoch from before no longer matches.
+    epoch++;
+
     if (state != nullptr) {
-        State* old = state;
+        const auto old = state;
+        old->clock.reset();
+
+        emitLifecycle("exit");
 
         old->platform.removePump(pump);
 
@@ -167,13 +262,36 @@ void world_sim_exit()
             old->platform.setWorldPaused(false);
         }
 
-        // Tokens held elsewhere only hold weak references.
-        delete old;
+        // Tokens held elsewhere only hold weak references. An active pump
+        // retains this state until its old clock has returned from advance().
         return;
     }
 
     initialized = false;
     mode = WORLD_SIM_EXISTING;
+}
+
+uint64_t world_sim_epoch()
+{
+    return epoch;
+}
+
+void world_sim_invalidate()
+{
+    if (!delivering && initialized) {
+        epoch++;
+        if (pumping && state != nullptr) state->clock.reset();
+        emitLifecycle("invalidate");
+    }
+}
+
+bool world_sim_drain()
+{
+    if (state == nullptr || pumping || delivering) return false;
+    const auto pass = state;
+    const uint64_t passEpoch = epoch;
+    pump();
+    return state == pass && epoch == passEpoch;
 }
 
 int world_sim_mode()
@@ -193,7 +311,7 @@ bool world_sim_world_paused()
 
 PauseToken world_sim_pause()
 {
-    if (state == nullptr) {
+    if (delivering || state == nullptr) {
         return PauseToken();
     }
 
@@ -202,6 +320,14 @@ PauseToken world_sim_pause()
 
 void world_sim_reset()
 {
+    if (delivering) {
+        return;
+    }
+
+    if (initialized) {
+        epoch++;
+    }
+
     if (state == nullptr) {
         return;
     }
@@ -214,6 +340,8 @@ void world_sim_reset()
             state->platform.pauseOriginReset();
         }
     }
+
+    emitLifecycle("reset");
 }
 
 void world_sim_note_legacy_calendar_tick()

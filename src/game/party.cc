@@ -159,6 +159,35 @@ int partyMemberRemove(Object* object)
     return 0;
 }
 
+// Undoes partyMemberAdd for the player when obj_init fails after adding it.
+// Acts only in the state obj_init leaves (the player alone in slot 0).
+// partyMemberAdd allocates nothing beyond the slot: script and vars stay NULL,
+// and the script flags and object id it set go away with the object.
+void partyMemberDropPlayer(Object* player)
+{
+    if (player == NULL || partyMemberCount != 1 || partyStatePrepped) {
+        return;
+    }
+
+    PartyMember* partyMember = &(partyMemberList[0]);
+    if (partyMember->object != player) {
+        return;
+    }
+
+    partyMember->object = NULL;
+    partyMember->script = NULL;
+    partyMember->vars = NULL;
+
+    player->flags &= ~(OBJECT_NO_REMOVE | OBJECT_NO_SAVE);
+
+    partyMemberCount = 0;
+
+    Script* script;
+    if (scr_ptr(player->sid, &script) != -1) {
+        script->scr_flags &= ~(SCRIPT_FLAG_0x08 | SCRIPT_FLAG_0x10);
+    }
+}
+
 // 0x48542C
 int partyMemberPrepSave()
 {

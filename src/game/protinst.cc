@@ -28,6 +28,9 @@
 #include "plib/color/color.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/rect.h"
+#include "sim/object_drop.h"
+#include "sim/object_teardown.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -522,10 +525,17 @@ int obj_pickup(Object* critter, Object* item)
 // 0x48AB24
 int obj_remove_from_inven(Object* critter, Object* item)
 {
+    const bool rightHand = inven_right_hand(critter) == item;
+    const bool leftHand = inven_left_hand(critter) == item;
+    const bool worn = inven_worn(critter) == item;
+    // Stack splitting is the only fallible removal step. Do it before changing
+    // actor appearance or UI state, and propagate failure without mutation.
+    if (item_remove_mult(critter, item, 1) != 0) return -1;
+
     Rect updatedRect;
     int fid;
     int v11 = 0;
-    if (inven_right_hand(critter) == item) {
+    if (rightHand) {
         if (critter != obj_dude || intface_is_item_right_hand()) {
             fid = art_id(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, FID_ANIM_TYPE(critter->fid), 0, critter->rotation);
             obj_change_fid(critter, fid, &updatedRect);
@@ -533,7 +543,7 @@ int obj_remove_from_inven(Object* critter, Object* item)
         } else {
             v11 = 1;
         }
-    } else if (inven_left_hand(critter) == item) {
+    } else if (leftHand) {
         if (critter == obj_dude && !intface_is_item_right_hand()) {
             fid = art_id(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, FID_ANIM_TYPE(critter->fid), 0, critter->rotation);
             obj_change_fid(critter, fid, &updatedRect);
@@ -541,7 +551,7 @@ int obj_remove_from_inven(Object* critter, Object* item)
         } else {
             v11 = 1;
         }
-    } else if (inven_worn(critter) == item) {
+    } else if (worn) {
         if (critter == obj_dude) {
             int v5 = 1;
 
@@ -556,8 +566,6 @@ int obj_remove_from_inven(Object* critter, Object* item)
         }
     }
 
-    int rc = item_remove_mult(critter, item, 1);
-
     if (v11 >= 2) {
         tile_refresh_rect(&updatedRect, critter->elevation);
     }
@@ -566,74 +574,42 @@ int obj_remove_from_inven(Object* critter, Object* item)
         intface_update_items(false);
     }
 
-    return rc;
+    return 0;
+}
+
+static void run_drop_script(int sid, Object* actor, Object* item)
+{
+    scr_set_objs(sid, actor, item);
+    exec_script_proc(sid, SCRIPT_PROC_DROP);
+}
+
+static bool read_drop_override(int sid, bool* overrides)
+{
+    Script* script;
+    if (scr_ptr(sid, &script) == -1) return false;
+    *overrides = script->scriptOverrides;
+    return true;
 }
 
 // 0x48AC94
-int obj_drop(Object* a1, Object* a2)
+int obj_drop(Object* actor, Object* item)
 {
-    int sid = -1;
-    bool scriptOverrides = false;
-
-    if (a2 == NULL) {
-        return -1;
-    }
-
-    if (obj_sid(a2, &sid) != -1) {
-        scr_set_objs(sid, a1, a2);
-        exec_script_proc(sid, SCRIPT_PROC_DROP);
-
-        Script* scr;
-        if (scr_ptr(sid, &scr) == -1) {
-            return -1;
-        }
-
-        scriptOverrides = scr->scriptOverrides;
-    }
-
-    if (scriptOverrides) {
-        return 0;
-    }
-
-    if (obj_remove_from_inven(a1, a2) == 0) {
-        Object* owner = obj_top_environment(a1);
-        if (owner == NULL) {
-            owner = a1;
-        }
-
-        Rect updatedRect;
-        obj_connect(a2, owner->tile, owner->elevation, &updatedRect);
-        tile_refresh_rect(&updatedRect, owner->elevation);
-    }
-
-    return 0;
+    static const ObjectDropHooks hooks {
+        obj_sid, run_drop_script, read_drop_override, obj_remove_from_inven,
+        obj_top_environment, obj_connect, tile_refresh_rect
+    };
+    return object_drop_guarded(object_registry(), actor, item, world_sim_epoch, hooks);
 }
 
 // 0x48AD38
 int obj_destroy(Object* obj)
 {
-    if (obj == NULL) {
-        return -1;
-    }
-
-    int elev;
-    Object* owner = obj->owner;
-    if (owner != NULL) {
-        obj_remove_from_inven(owner, obj);
-    } else {
-        elev = obj->elevation;
-    }
-
-    queue_remove(obj);
-
-    Rect rect;
-    obj_erase_object(obj, &rect);
-
-    if (owner == NULL) {
-        tile_refresh_rect(&rect, elev);
-    }
-
-    return 0;
+    static const ObjectDestroyHooks hooks {
+        world_sim_epoch, obj_is_destroying, obj_erase_object_with_commit,
+        obj_remove_from_inven, [](Object* object) { queue_remove(object); },
+        tile_refresh_rect
+    };
+    return object_destroy_guarded(obj, hooks);
 }
 
 // Read a book.

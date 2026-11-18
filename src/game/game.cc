@@ -393,7 +393,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
 }
 
 // 0x43B5A8
-void game_reset()
+int game_reset()
 {
     world_sim_reset();
     tile_disable_refresh();
@@ -414,7 +414,7 @@ void game_reset()
     movieStop();
     moviefx_reset();
     gmovie_reset();
-    iso_reset();
+    if (iso_reset() != 0) return -1;
     gmouse_reset();
     proto_reset();
     scr_reset();
@@ -429,10 +429,11 @@ void game_reset()
     game_user_wants_to_quit = 0;
     automap_reset();
     init_options_menu();
+    return 0;
 }
 
 // 0x43B654
-void game_exit()
+int game_exit()
 {
     sim_service_exit();
     tile_disable_refresh();
@@ -448,7 +449,7 @@ void game_exit()
     anim_exit();
     proto_exit();
     gmouse_exit();
-    iso_exit();
+    if (iso_exit() != 0) return -1;
     moviefx_exit();
     gmovie_exit();
     movieClose();
@@ -469,6 +470,7 @@ void game_exit()
     windowClose();
     db_exit();
     gconfig_exit(true);
+    return 0;
 }
 
 // 0x43B748

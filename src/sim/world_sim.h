@@ -1,6 +1,7 @@
 #ifndef FALLOUT_SIM_WORLD_SIM_H_
 #define FALLOUT_SIM_WORLD_SIM_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "sim/pause_set.h"
@@ -57,6 +58,28 @@ struct WorldSimPlatform {
 
     // Optional.
     void (*log)(const char* text);
+
+    // Optional, mode 2 only. Runs once per actual 60 Hz simulation tick.
+    // May pause or change lifecycle. That ends the current batch, including a
+    // pause released inside the callback. Nested pumps do nothing. An epoch or
+    // service change abandons the remaining elapsed time and takes a fresh
+    // clock baseline on the next pump. No movement/input sampling is implied.
+    void (*gameplayTick)();
+
+    // Optional. Receives one diagnostic line (no newline) for a pause, a
+    // lifecycle change, or every 600 ticks. Null means no diagnostics. It is
+    // called while the service is in the middle of an operation: it may only
+    // format and write the line. It must not call any world_sim function and
+    // must not run gameplay. While it runs, world_sim_init() returns false,
+    // world_sim_exit(), world_sim_reset() and world_sim_invalidate() do nothing,
+    // and world_sim_pause() returns an empty token.
+    void (*event)(const char* line);
+
+    // Optional. Writes a suffix for the periodic summary line, starting with a
+    // space, such as " game_time=12". It only reads game state. The same rule as
+    // for `event` applies: it must not call any world_sim function or run
+    // gameplay, and the same calls are refused while it runs.
+    void (*describe)(char* out, size_t size);
 };
 
 // Returns false, and changes nothing, if the service is already started, the
@@ -71,6 +94,11 @@ bool world_sim_init(int mode, const WorldSimPlatform& platform);
 void world_sim_exit();
 
 int world_sim_mode();
+
+// Drain due ticks with the current intent before publishing a new input sample.
+// Returns false for nested/diagnostic calls, lifecycle changes, or inactivity; callers
+// must not publish fresh intent then. Uses the same pinned background pump.
+bool world_sim_drain();
 
 // `true` in mode 2. The legacy pause code runs when this is false.
 bool world_sim_owns_pauses();
@@ -87,6 +115,29 @@ PauseToken world_sim_pause();
 // progress moves to now, so timers made after the reset are not shifted by the
 // time before it.
 void world_sim_reset();
+
+// The lifecycle generation. It counts up for the whole life of the process and
+// never goes back, so a value read earlier equals the current one only if
+// nothing below happened in between. It changes when:
+//   - world_sim_init() succeeds, in every mode, mode 0 included;
+//   - world_sim_reset() runs while the service is started (also in mode 0);
+//   - world_sim_exit() ends a started service.
+// A refused init, a reset before init, and an exit when not started change
+// nothing. With no service started the value stays where it was; it is not
+// reset to zero. A consumer stores the value with its own state and drops that
+// state when the value no longer matches.
+//
+// An epoch change is not a pause. It tells consumers that earlier marks are
+// stale. Reset and in-pump invalidation also rebase the clock as documented.
+uint64_t world_sim_epoch();
+
+// Marks that the map the world was built on is being replaced, without a game
+// reset: changes the epoch while the service is started and does nothing
+// otherwise. It leaves the tick count, pause set and pause start unchanged.
+// During a pump it also abandons that batch and resets the clock baseline;
+// outside a pump it leaves the clock unchanged. A consumer that keeps a mark or a
+// pass in flight across the replacement sees the epoch change and drops it.
+void world_sim_invalidate();
 
 // Counts a tick of the legacy calendar, for the shadow comparison.
 void world_sim_note_legacy_calendar_tick();

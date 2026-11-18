@@ -16,6 +16,8 @@
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
 #include "sim/procedure_table.h"
+#include "sim/program_dispatch.h"
+#include "sim/script_binding.h"
 
 namespace fallout {
 
@@ -398,6 +400,7 @@ static void purgeProgram(Program* program)
 // 0x45B924
 void interpretFreeProgram(Program* program)
 {
+    program_lifetimes().retire(program);
     // NOTE: Uninline.
     detachProgram(program);
 
@@ -472,6 +475,10 @@ Program* allocateProgram(const char* path)
     program->stackValues = new ProgramStack();
     program->returnStackValues = new ProgramStack();
 
+    if (program_lifetimes().admit(program) == 0) {
+        interpretFreeProgram(program);
+        return NULL;
+    }
     return program;
 }
 
@@ -660,13 +667,9 @@ static void op_call_at(Program* program)
         data[arg] = programStackPopInteger(program);
     }
 
-    unsigned char* procedure_ptr = program->procedures + 4 + sizeof(Procedure) * data[0];
-
-    int delay = 1000 * data[1] + interpreterNow();
-    int flags = fetchLong(procedure_ptr, 4);
-
-    storeLong(delay, procedure_ptr, 8);
-    storeLong(flags | PROCEDURE_FLAG_TIMED, procedure_ptr, 4);
+    // Inside a suspension the delay counts from where the suspension began (see
+    // procedure_table_schedule_timed).
+    procedure_table_schedule_timed(program->procedures, sizeof(Procedure), PROCEDURE_FLAG_TIMED, data[0], data[1], interpreterNow(), suspendEvents != 0, interpreter_units(suspendTime, timerTick));
 }
 
 // 0x45C0DC
@@ -2640,6 +2643,11 @@ void interpret(Program* program, int a2)
     currentProgram = oldCurrentProgram;
 }
 
+bool interpretIsRunning()
+{
+    return currentProgram != NULL;
+}
+
 // Prepares program stacks for executing proc at [address].
 //
 // 0x460884
@@ -2957,19 +2965,17 @@ void interpretSetCPUBurstSize(int value)
 // 0x461F28
 void updatePrograms()
 {
-    ProgramListNode* curr = head;
-    while (curr != NULL) {
-        ProgramListNode* next = curr->next;
-        if (curr->program != NULL) {
-            interpret(curr->program, cpuBurstSize);
-        }
-        if (curr->program->exited) {
-            removeProgList(curr);
-        }
-        curr = next;
-    }
+    program_dispatch_all(head, [](Program* program) { interpret(program, cpuBurstSize); }, [](Program* program) { return program->exited; }, removeProgList);
     doEvents();
     updateIntLib();
+}
+
+// Runs one program and leaves every other program, the timed and conditional
+// procedures and the named events alone. For a world pause that still has to
+// execute a script synchronously.
+void updateProgram(Program* program)
+{
+    program_dispatch_one(head, program, [](Program* p) { interpret(p, cpuBurstSize); }, [](Program* p) { return p->exited; }, removeProgList);
 }
 
 // 0x461F74

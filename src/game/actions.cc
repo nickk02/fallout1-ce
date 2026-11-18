@@ -33,23 +33,24 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
+#include "sim/attack_callbacks.h"
+#include "sim/attack_participants.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
 static int pick_death(Object* attacker, Object* defender, int damage, int damage_type, int anim, bool isFallingBack);
 static int check_death(Object* obj, int anim, int minViolenceLevel, bool isFallingBack);
-static int internal_destroy(Object* a1, Object* a2);
-static int show_death(Object* obj, int anim);
-static int action_melee(Attack* attack, int a2);
-static int action_ranged(Attack* attack, int a2);
+static int action_melee(Attack* attack, int a2, const AttackParticipants& participants, const ObjectRef& weapon, int visualDamageType);
+static int action_ranged(Attack* attack, int a2, const AttackParticipants& participants, const ObjectRef& weapon, int visualDamageType);
 static int is_next_to(Object* a1, Object* a2);
 static int action_climb_ladder(Object* a1, Object* a2);
-static int report_explosion(Attack* attack, Object* a2);
+static int report_explosion(void* payload, void* unused);
 static int finished_explosion(Object* a1, Object* a2);
 static int compute_explosion_damage(int min, int max, Object* a3, int* a4);
 static int can_talk_to(Object* a1, Object* a2);
 static int talk_to(Object* a1, Object* a2);
-static int report_dmg(Attack* attack, Object* a2);
+static int report_dmg(void* payload, void* unused);
 static int compute_dmg_damage(int min, int max, Object* obj, int* a4, int damage_type);
 
 // 0x4FEA50
@@ -251,20 +252,29 @@ static int check_death(Object* obj, int anim, int min_violence_level, bool hit_f
     return ANIM_FALL_FRONT;
 }
 
-// 0x410808
-static int internal_destroy(Object* a1, Object* a2)
+static int register_attack_callback(ObjectRef actor, ObjectRef weapon, AttackCallbackKind kind, int anim)
 {
-    return obj_destroy(a2);
+    static const AttackCallbackHooks hooks {
+        obj_drop, obj_destroy, obj_bound, obj_toggle_flat,
+        obj_turn_off_outline, item_drop_all, tile_refresh_rect
+    };
+    auto payload = std::make_unique<AttackAnimationPayload>(object_registry(), actor, weapon, kind, anim, world_sim_epoch, hooks);
+    return register_owned_callback(std::move(payload), -1, true);
 }
 
 // TODO: Check very carefully, lots of conditions and jumps.
 //
 // 0x410810
-void show_damage_to_object(Object* defender, int damage, int flags, Object* weapon, bool hit_from_front, int knockback_distance, int knockback_rotation, int a8, Object* attacker, int delay)
+void show_damage_to_object(Object* defender, int damage, int flags, Object* weapon, bool hit_from_front, int knockback_distance, int knockback_rotation, int a8, Object* attacker, int delay, int visualDamageType)
 {
     int anim;
     int fid;
     const char* sfx_name;
+
+    // Capture before any registration can clear an old sequence and reenter.
+    const uint64_t callbackEpoch = world_sim_epoch();
+    const ObjectRef callbackActor = object_ref_make(object_registry(), defender, callbackEpoch);
+    const ObjectRef callbackWeapon = object_ref_make(object_registry(), weapon, callbackEpoch);
 
     anim = FID_ANIM_TYPE(defender->fid);
     if (!critter_is_prone(defender)) {
@@ -277,7 +287,8 @@ void show_damage_to_object(Object* defender, int damage, int flags, Object* weap
             } else if (attacker->fid == FID_0x20001F5) {
                 anim = check_death(defender, a8, VIOLENCE_LEVEL_MAXIMUM_BLOOD, hit_from_front);
             } else {
-                anim = pick_death(attacker, defender, damage, item_w_damage_type(weapon), a8, hit_from_front);
+                int damageType = attack_visual_damage_type(visualDamageType, weapon, item_w_damage_type);
+                anim = pick_death(attacker, defender, damage, damageType, a8, hit_from_front);
             }
 
             if (anim != ANIM_FIRE_DANCE) {
@@ -373,7 +384,7 @@ void show_damage_to_object(Object* defender, int damage, int flags, Object* weap
 
     if (weapon != NULL) {
         if ((flags & DAM_EXPLODE) != 0) {
-            register_object_must_call(defender, weapon, (AnimationCallback*)obj_drop, -1);
+            register_attack_callback(callbackActor, callbackWeapon, AttackCallbackKind::Drop, 0);
             fid = art_id(OBJ_TYPE_MISC, 10, 0, 0, 0);
             register_object_change_fid(weapon, fid, 0);
             register_object_animate_and_hide(weapon, ANIM_STAND, 0);
@@ -383,46 +394,15 @@ void show_damage_to_object(Object* defender, int damage, int flags, Object* weap
 
             register_object_must_erase(weapon);
         } else if ((flags & DAM_DESTROY) != 0) {
-            register_object_must_call(defender, weapon, (AnimationCallback*)internal_destroy, -1);
+            register_attack_callback(callbackActor, callbackWeapon, AttackCallbackKind::Destroy, 0);
         } else if ((flags & DAM_DROP) != 0) {
-            register_object_must_call(defender, weapon, (AnimationCallback*)obj_drop, -1);
+            register_attack_callback(callbackActor, callbackWeapon, AttackCallbackKind::Drop, 0);
         }
     }
 
     if ((flags & DAM_DEAD) != 0) {
-        // TODO: Get rid of casts.
-        register_object_must_call(defender, (void*)anim, (AnimationCallback*)show_death, -1);
+        register_attack_callback(callbackActor, {}, AttackCallbackKind::Death, anim);
     }
-}
-
-// 0x410D50
-static int show_death(Object* obj, int anim)
-{
-    Rect temp_rect;
-    Rect dirty_rect;
-
-    obj_bound(obj, &dirty_rect);
-
-    if (obj->pid != 16777266 && obj->pid != 16777265 && obj->pid != 16777224) {
-        obj->flags |= OBJECT_NO_BLOCK;
-        if (obj_toggle_flat(obj, &temp_rect) == 0) {
-            rect_min_bound(&dirty_rect, &temp_rect, &dirty_rect);
-        }
-    }
-
-    if (obj_turn_off_outline(obj, &temp_rect) == 0) {
-        rect_min_bound(&dirty_rect, &temp_rect, &dirty_rect);
-    }
-
-    if (anim >= ANIM_ELECTRIFIED_TO_NOTHING && anim <= ANIM_EXPLODED_TO_NOTHING) {
-        if (obj->pid != 16777265 && obj->pid != 16777266 && obj->pid != 16777239) {
-            item_drop_all(obj, obj->tile);
-        }
-    }
-
-    tile_refresh_rect(&dirty_rect, obj->elevation);
-
-    return 0;
 }
 
 // 0x410E74
@@ -536,32 +516,58 @@ void show_damage(Attack* attack, int a2, int delay)
 }
 
 // 0x411134
-int action_attack(Attack* attack)
+int action_attack(Attack* input)
 {
-    if (register_clear(attack->attacker) == -2) {
-        return -1;
-    }
-
-    if (register_clear(attack->defender) == -2) {
-        return -1;
-    }
-
-    for (int index = 0; index < attack->extrasLength; index++) {
-        if (register_clear(attack->extras[index]) == -2) {
-            return -1;
-        }
-    }
-
-    int anim = item_w_anim(attack->attacker, attack->hitMode);
+    // Script/forced callbacks may rewrite main_ctd. Sequencing keeps its own
+    // numeric snapshot and refreshes only the captured allocations.
+    Attack local = *input;
+    const uint64_t epoch = world_sim_epoch();
+    const AttackParticipants participants(object_registry(), local, epoch, obj_dude);
+    const ObjectRef weapon = object_ref_make(object_registry(), local.weapon, epoch);
+    if (!participants.clearForAttack(object_registry(), world_sim_epoch, [] { return obj_dude; }, local, weapon, [](Object* actor) { return register_clear(actor); })) return -1;
+    if (local.attacker == NULL || local.defender == NULL) return -1;
+    if (!participants.refreshForAttack(object_registry(), world_sim_epoch(), obj_dude, local, weapon)) return -1;
+    const int visualDamageType = item_w_damage_type(local.weapon);
+    int anim = item_w_anim(local.attacker, local.hitMode);
     if (anim < ANIM_FIRE_SINGLE && anim != ANIM_THROW_ANIM) {
-        return action_melee(attack, anim);
-    } else {
-        return action_ranged(attack, anim);
+        return action_melee(&local, anim, participants, weapon, visualDamageType);
     }
+    return action_ranged(&local, anim, participants, weapon, visualDamageType);
+}
+
+// Extra sequences can complete synchronously as well. Validate between each
+// registration, so one forced callback cannot invalidate the next extra.
+static int show_damage_extras_checked(Attack* attack, const AttackParticipants& participants,
+    const ObjectRef& weapon, bool consumedThrow, int visualDamageType)
+{
+    if (!participants.refreshForAttack(object_registry(), world_sim_epoch(), obj_dude, *attack, weapon, consumedThrow)) return -1;
+    for (int index = 0; index < attack->extrasLength; index++) {
+        if (!participants.refreshForAttack(object_registry(), world_sim_epoch(), obj_dude, *attack, weapon, consumedThrow)) return -1;
+        Object* obj = attack->extras[index];
+        if (obj == NULL || FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) continue;
+        int delta = attack->attacker->rotation - obj->rotation;
+        if (delta < 0) delta = -delta;
+        int front = delta != 0 && delta != 1 && delta != 5;
+        register_begin(ANIMATION_REQUEST_RESERVED);
+        register_priority(1);
+        int anim = item_w_anim(attack->attacker, attack->hitMode);
+        int rotation = tile_dir(attack->attacker->tile, obj->tile);
+        show_damage_to_object(obj, attack->extrasDamage[index], attack->extrasFlags[index], attack->weapon,
+            front, attack->extrasKnockback[index], rotation, anim, attack->attacker, 0, visualDamageType);
+        // End the registration even if a callback invalidated participants;
+        // refusing to call it here would strand the accumulating sequence.
+        int status = register_end();
+        bool valid = participants.refresh(object_registry(), world_sim_epoch(), obj_dude, *attack);
+        if (!valid || !participants.refreshForAttack(object_registry(), world_sim_epoch(), obj_dude, *attack, weapon, consumedThrow)) return -1;
+        // Preserve the existing extras policy: a failed registration does not
+        // roll back previously registered sequences or committed effects.
+        (void)status;
+    }
+    return 0;
 }
 
 // 0x4111C4
-static int action_melee(Attack* attack, int anim)
+static int action_melee(Attack* attack, int anim, const AttackParticipants& participants, const ObjectRef& weaponRef, int visualDamageType)
 {
     int fid;
     Art* art;
@@ -654,17 +660,14 @@ static int action_melee(Attack* attack, int anim)
         combatai_msg(attack->attacker, attack, AI_MESSAGE_TYPE_MISS, -1);
     }
 
-    if (register_end() == -1) {
-        return -1;
-    }
-
-    show_damage_extras(attack);
-
-    return 0;
+    int status = register_end();
+    bool valid = participants.refresh(object_registry(), world_sim_epoch(), obj_dude, *attack);
+    if (status == -1 || !valid) return -1;
+    return show_damage_extras_checked(attack, participants, weaponRef, false, visualDamageType);
 }
 
 // 0x4114DC
-static int action_ranged(Attack* attack, int anim)
+static int action_ranged(Attack* attack, int anim, const AttackParticipants& participants, const ObjectRef& weaponRef, int visualDamageType)
 {
     Object* neighboors[6];
     memset(neighboors, 0, sizeof(neighboors));
@@ -675,6 +678,10 @@ static int action_ranged(Attack* attack, int anim)
     Object* projectile = NULL;
     Object* v50 = NULL;
     int weaponFid = -1;
+    bool consumedThrow = false;
+    const uint64_t sequenceEpoch = world_sim_epoch();
+    ObjectRef projectileRef;
+    ObjectRef neighborRefs[ROTATION_COUNT];
 
     Proto* weaponProto;
     Object* weapon = attack->weapon;
@@ -727,7 +734,7 @@ static int action_ranged(Attack* attack, int anim)
                     weaponFid = weapon->fid;
                     int weaponFlags = weapon->flags;
 
-                    item_remove_mult(attack->attacker, weapon, 1);
+                    consumedThrow = item_remove_mult(attack->attacker, weapon, 1) == 0;
                     v50 = item_replace(attack->attacker, weapon, weaponFlags & OBJECT_IN_ANY_HAND);
                     obj_change_fid(projectile, projectileProto->fid, NULL);
 
@@ -740,6 +747,7 @@ static int action_ranged(Attack* attack, int anim)
                     obj_new(&projectile, projectileProto->fid, -1);
                 }
 
+                projectileRef = object_ref_make(object_registry(), projectile, sequenceEpoch);
                 obj_turn_off(projectile, NULL);
 
                 obj_set_light(projectile, 9, projectile->lightIntensity, NULL);
@@ -799,6 +807,7 @@ static int action_ranged(Attack* attack, int anim)
 
                         for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
                             if (obj_new(&(neighboors[rotation]), explosionFid, -1) != -1) {
+                                neighborRefs[rotation] = object_ref_make(object_registry(), neighboors[rotation], sequenceEpoch);
                                 obj_turn_off(neighboors[rotation], NULL);
 
                                 int v31 = tile_num_in_direction(v24, rotation, 1);
@@ -888,24 +897,27 @@ static int action_ranged(Attack* attack, int anim)
         }
     }
 
-    if (register_end() == -1) {
+    int status = register_end();
+    bool valid = participants.refresh(object_registry(), world_sim_epoch(), obj_dude, *attack);
+    if (status == -1) {
         debug_printf("Something went wrong with a ranged attack sequence!\n");
         if (projectile != NULL && (isGrenade || damageType == DAMAGE_TYPE_EXPLOSION || anim != ANIM_THROW_ANIM)) {
-            obj_erase_object(projectile, NULL);
+            Object* live = static_cast<Object*>(object_ref_resolve(object_registry(), projectileRef, world_sim_epoch()));
+            if (live != NULL) obj_erase_object(live, NULL);
         }
 
         for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
             if (neighboors[rotation] != NULL) {
-                obj_erase_object(neighboors[rotation], NULL);
+                Object* live = static_cast<Object*>(object_ref_resolve(object_registry(), neighborRefs[rotation], world_sim_epoch()));
+                if (live != NULL) obj_erase_object(live, NULL);
             }
         }
 
         return -1;
     }
 
-    show_damage_extras(attack);
-
-    return 0;
+    if (!valid) return -1;
+    return show_damage_extras_checked(attack, participants, weaponRef, consumedThrow, visualDamageType);
 }
 
 // 0x411BCC
@@ -1605,27 +1617,62 @@ int action_explode(int tile, int elevation, int minDamage, int maxDamage, Object
     attack->tile = tile;
     attack->attackerFlags = DAM_HIT;
 
+    const uint64_t reportEpoch = world_sim_epoch();
+    const ObjectRef sourceRef = object_ref_make(object_registry(), a5, reportEpoch);
+    const ObjectRef visualRef = object_ref_make(object_registry(), explosion, reportEpoch);
+    ObjectRef adjacentRefs[ROTATION_COUNT];
+    for (int i = 0; i < ROTATION_COUNT; i++) {
+        adjacentRefs[i] = object_ref_make(object_registry(), adjacentExplosions[i], reportEpoch);
+    }
+    auto preparationAlive = [&] {
+        if (a5 != NULL && object_ref_resolve(object_registry(), sourceRef, world_sim_epoch()) == NULL) return false;
+        for (const ObjectRef& ref : adjacentRefs) {
+            if (object_ref_resolve(object_registry(), ref, world_sim_epoch()) == NULL) return false;
+        }
+        return true;
+    };
+    auto abortReport = [&] {
+        Object* visual = static_cast<Object*>(object_ref_resolve(object_registry(), visualRef, world_sim_epoch()));
+        if (visual != NULL) obj_erase_object(visual, NULL);
+        for (const ObjectRef& ref : adjacentRefs) {
+            Object* adjacent = static_cast<Object*>(object_ref_resolve(object_registry(), ref, world_sim_epoch()));
+            if (adjacent != NULL) obj_erase_object(adjacent, NULL);
+        }
+        mem_free(attack);
+        if (premature) action_in_explode = false;
+        game_ui_enable();
+        return -1;
+    };
+    const AttackParticipants primary(object_registry(), *attack, reportEpoch, obj_dude);
     game_ui_disable(1);
 
     if (critter != NULL) {
-        if (register_clear(critter) == -2) {
-            debug_printf("Cannot clear target's animation for action_explode!\n");
-        }
+        if (!primary.run(object_registry(), world_sim_epoch, [] { return obj_dude; }, *attack, [&] {
+                if (register_clear(critter) == -2) {
+                    debug_printf("Cannot clear target's animation for action_explode!\n");
+                } }) || !preparationAlive()) return abortReport();
+        critter = attack->defender;
         attack->defenderDamage = compute_explosion_damage(minDamage, maxDamage, critter, &(attack->defenderKnockback));
     }
 
+    if (!primary.refresh(object_registry(), world_sim_epoch(), obj_dude, *attack) || !preparationAlive()) return abortReport();
     compute_explosion_on_extras(attack, 0, 0, 1);
+    const AttackParticipants discovered(object_registry(), *attack, reportEpoch, obj_dude);
 
     for (int index = 0; index < attack->extrasLength; index++) {
         Object* critter = attack->extras[index];
-        if (register_clear(critter) == -2) {
-            debug_printf("Cannot clear extra's animation for action_explode!\n");
-        }
+        if (!discovered.run(object_registry(), world_sim_epoch, [] { return obj_dude; }, *attack, [&] {
+                if (register_clear(critter) == -2) {
+                    debug_printf("Cannot clear extra's animation for action_explode!\n");
+                } }) || !preparationAlive()) return abortReport();
+        critter = attack->extras[index];
 
         attack->extrasDamage[index] = compute_explosion_damage(minDamage, maxDamage, critter, &(attack->extrasKnockback[index]));
     }
 
     death_checks(attack);
+    auto report = std::make_shared<DeferredAttackReport>(object_registry(), *attack, world_sim_epoch(), obj_dude, a5);
+    AttackReportRegistration delivery(report);
 
     if (premature) {
         action_in_explode = true;
@@ -1649,24 +1696,20 @@ int action_explode(int tile, int elevation, int minDamage, int maxDamage, Object
             register_object_must_erase(adjacentExplosions[rotation]);
         }
 
-        register_object_must_call(attack, a5, (AnimationCallback*)report_explosion, -1);
+        register_object_must_call(delivery.token(), NULL, report_explosion, -1);
         register_object_must_call(NULL, NULL, (AnimationCallback*)finished_explosion, -1);
         if (register_end() == -1) {
-            action_in_explode = false;
-
-            obj_erase_object(explosion, NULL);
-
-            for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
-                obj_erase_object(adjacentExplosions[rotation], NULL);
-            }
-
-            mem_free(attack);
-
-            game_ui_enable();
-            return -1;
+            return abortReport();
         }
 
-        show_damage_extras(attack);
+        delivery.commit();
+        Object* visual = static_cast<Object*>(object_ref_resolve(object_registry(), visualRef, world_sim_epoch()));
+        if (visual != NULL && report->refresh(object_registry(), world_sim_epoch(), obj_dude)) {
+            Attack animationAttack = report->attack;
+            animationAttack.attacker = visual;
+            show_damage_extras(&animationAttack);
+        }
+        mem_free(attack);
     } else {
         if (critter != NULL) {
             if ((attack->defenderFlags & DAM_DEAD) != 0) {
@@ -1680,14 +1723,19 @@ int action_explode(int tile, int elevation, int minDamage, int maxDamage, Object
             }
         }
 
-        report_explosion(attack, a5);
+        report_explosion(delivery.token(), NULL);
+        mem_free(attack);
 
-        combat_explode_scenery(explosion, NULL);
+        Object* visual = static_cast<Object*>(object_ref_resolve(object_registry(), visualRef, world_sim_epoch()));
+        if (visual != NULL) combat_explode_scenery(visual, NULL);
 
-        obj_erase_object(explosion, NULL);
-
-        for (int rotation = 0; rotation < ROTATION_COUNT; rotation++) {
-            obj_erase_object(adjacentExplosions[rotation], NULL);
+        // Scenery scripts can delete objects or replace the world. Resolve the
+        // original allocations again before each deletion.
+        visual = static_cast<Object*>(object_ref_resolve(object_registry(), visualRef, world_sim_epoch()));
+        if (visual != NULL) obj_erase_object(visual, NULL);
+        for (const ObjectRef& ref : adjacentRefs) {
+            Object* adjacent = static_cast<Object*>(object_ref_resolve(object_registry(), ref, world_sim_epoch()));
+            if (adjacent != NULL) obj_erase_object(adjacent, NULL);
         }
     }
 
@@ -1695,8 +1743,19 @@ int action_explode(int tile, int elevation, int minDamage, int maxDamage, Object
 }
 
 // 0x412EBC
-static int report_explosion(Attack* attack, Object* a2)
+static int report_explosion(void* payload, void* unused)
 {
+    auto report = AttackReportRegistration::take(payload);
+    Attack* attack = &report->attack;
+    const AttackParticipants& participants = report->participants;
+    Object* a2 = NULL;
+    auto checkpoint = [&] {
+        if (!report->refresh(object_registry(), world_sim_epoch(), obj_dude)) return false;
+        a2 = report->source;
+        return true;
+    };
+    auto discard = [&] { game_ui_enable(); return 0; };
+    if (!checkpoint()) return discard();
     bool mainTargetWasDead;
     if (attack->defender != NULL) {
         mainTargetWasDead = (attack->defender->data.critter.combat.results & DAM_DEAD) != 0;
@@ -1706,12 +1765,13 @@ static int report_explosion(Attack* attack, Object* a2)
 
     bool extrasWasDead[6];
     for (int index = 0; index < attack->extrasLength; index++) {
-        extrasWasDead[index] = (attack->extras[index]->data.critter.combat.results & DAM_DEAD) != 0;
+        extrasWasDead[index] = attack->extras[index] != NULL && (attack->extras[index]->data.critter.combat.results & DAM_DEAD) != 0;
     }
 
     death_checks(attack);
+    if (!checkpoint()) return discard();
     combat_display(attack);
-    apply_damage(attack, false);
+    if (!checkpoint() || !apply_damage(attack, false, &participants) || !checkpoint()) return discard();
 
     Object* anyDefender = NULL;
     int xp = 0;
@@ -1729,6 +1789,7 @@ static int report_explosion(Attack* attack, Object* a2)
 
         for (int index = 0; index < attack->extrasLength; index++) {
             Object* critter = attack->extras[index];
+            if (critter == NULL) continue;
             if (critter != a2) {
                 if ((critter->data.critter.combat.results & DAM_DEAD) != 0) {
                     if (a2 == obj_dude && !extrasWasDead[index]) {
@@ -1760,7 +1821,6 @@ static int report_explosion(Attack* attack, Object* a2)
         }
     }
 
-    mem_free(attack);
     game_ui_enable();
 
     if (a2 == obj_dude) {
@@ -1882,10 +1942,23 @@ void action_dmg(int tile, int elevation, int minDamage, int maxDamage, int damag
     combat_ctd_init(attack, attacker, defender, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
     attack->tile = tile;
     attack->attackerFlags = DAM_HIT;
+    const uint64_t reportEpoch = world_sim_epoch();
+    const ObjectRef visualRef = object_ref_make(object_registry(), attacker, reportEpoch);
+    const AttackParticipants beforeClear(object_registry(), *attack, reportEpoch, obj_dude);
+    auto abortReport = [&] {
+        Object* visual = static_cast<Object*>(object_ref_resolve(object_registry(), visualRef, world_sim_epoch()));
+        if (visual != NULL) obj_erase_object(visual, NULL);
+        mem_free(attack);
+        game_ui_enable();
+    };
     game_ui_disable(1);
 
     if (defender != NULL) {
-        register_clear(defender);
+        if (!beforeClear.run(object_registry(), world_sim_epoch, [] { return obj_dude; }, *attack, [&] { register_clear(defender); })) {
+            abortReport();
+            return;
+        }
+        defender = attack->defender;
 
         int damage;
         if (bypassArmor) {
@@ -1898,19 +1971,22 @@ void action_dmg(int tile, int elevation, int minDamage, int maxDamage, int damag
     }
 
     death_checks(attack);
+    auto report = std::make_shared<DeferredAttackReport>(object_registry(), *attack, world_sim_epoch(), obj_dude, nullptr);
+    AttackReportRegistration delivery(report);
 
     if (animated) {
         register_begin(ANIMATION_REQUEST_RESERVED);
         register_object_play_sfx(attacker, "whc1xxx1", 0);
         show_damage(attack, death_3[damageType], 0);
-        register_object_must_call(attack, NULL, (AnimationCallback*)report_dmg, 0);
+        register_object_must_call(delivery.token(), NULL, report_dmg, 0);
         register_object_must_erase(attacker);
 
         if (register_end() == -1) {
-            obj_erase_object(attacker, NULL);
-            mem_free(attack);
+            abortReport();
             return;
         }
+        delivery.commit();
+        mem_free(attack);
     } else {
         if (defender != NULL) {
             if ((attack->defenderFlags & DAM_DEAD) != 0) {
@@ -1919,20 +1995,25 @@ void action_dmg(int tile, int elevation, int minDamage, int maxDamage, int damag
         }
 
         // NOTE: Uninline.
-        report_dmg(attack, NULL);
+        report_dmg(delivery.token(), NULL);
+        mem_free(attack);
 
-        obj_erase_object(attacker, NULL);
+        Object* visual = static_cast<Object*>(object_ref_resolve(object_registry(), visualRef, world_sim_epoch()));
+        if (visual != NULL) obj_erase_object(visual, NULL);
     }
-
-    game_ui_enable();
 }
 
 // 0x4133B4
-static int report_dmg(Attack* attack, Object* a2)
+static int report_dmg(void* payload, void* unused)
 {
-    combat_display(attack);
-    apply_damage(attack, false);
-    mem_free(attack);
+    auto report = AttackReportRegistration::take(payload);
+    Attack* attack = &report->attack;
+    if (report->refresh(object_registry(), world_sim_epoch(), obj_dude)) {
+        combat_display(attack);
+        if (report->refresh(object_registry(), world_sim_epoch(), obj_dude)) {
+            apply_damage(attack, false, &report->participants);
+        }
+    }
     game_ui_enable();
     return 0;
 }

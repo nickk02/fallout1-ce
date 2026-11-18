@@ -40,6 +40,7 @@
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -641,6 +642,10 @@ void gdialog_enter(Object* target, int a2)
     gdCenterTile = tile_center_tile;
     gdBarterMod = 0;
     gdPlayerTile = obj_dude->tile;
+
+    // Held until every exit below has cleared dialog_state_fix. The barter
+    // screen nests inside it.
+    ModalPause dialogPause;
     map_disable_bk_processes();
 
     dialog_state_fix = 1;
@@ -2692,7 +2697,11 @@ void barter_end_to_talk_to()
 {
     dialogQuit();
     dialogClose();
-    updatePrograms();
+    if (world_sim_world_paused()) {
+        updateProgram(dialogBlock.program);
+    } else {
+        updatePrograms();
+    }
     updateWindows();
     dialogue_state = 1;
     dialogue_switch_mode = 1;

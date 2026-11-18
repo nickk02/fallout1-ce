@@ -22,12 +22,15 @@
 #include "game/textobj.h"
 #include "game/tile.h"
 #include "game/worldmap.h"
+#include "object_handle.h"
 #include "plib/color/color.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/input.h"
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
+#include "sim/object_teardown.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -51,11 +54,11 @@ static void obj_blend_table_exit();
 static void obj_misc_table_init();
 static int obj_create_object(Object** objectPtr);
 static void obj_destroy_object(Object** objectPtr);
+static void obj_load_discard(Object** objectPtr);
 static int obj_create_object_node(ObjectListNode** nodePtr);
 static void obj_destroy_object_node(ObjectListNode** nodePtr);
 static int obj_node_ptr(Object* obj, ObjectListNode** out_node, ObjectListNode** out_prev_node);
 static void obj_insert(ObjectListNode* ptr);
-static int obj_remove(ObjectListNode* a1, ObjectListNode* a2);
 static int obj_connect_to_tile(ObjectListNode* node, int tile_index, int elev, Rect* rect);
 static int obj_adjust_light(Object* obj, int a2, Rect* rect);
 static void obj_render_outline(Object* object, Rect* rect);
@@ -289,27 +292,24 @@ int obj_init(unsigned char* buf, int width, int height, int pitch)
         return -1;
     }
 
+    // Failure ladder: each label releases what was acquired before the
+    // failing step, in reverse order. obj_offset_table_init, obj_order_table_init,
+    // obj_render_table_init and text_object_init release their own partial
+    // state when they fail.
     if (obj_order_table_init() == -1) {
-        obj_offset_table_exit();
-        return -1;
+        goto fail_offset_table;
     }
 
     if (obj_render_table_init() == -1) {
-        obj_order_table_exit();
-        obj_offset_table_exit();
-        return -1;
+        goto fail_order_table;
     }
 
     if (light_init() == -1) {
-        obj_order_table_exit();
-        obj_offset_table_exit();
-        return -1;
+        goto fail_render_table;
     }
 
     if (text_object_init(buf, width, height) == -1) {
-        obj_order_table_exit();
-        obj_offset_table_exit();
-        return -1;
+        goto fail_light;
     }
 
     obj_light_table_init();
@@ -329,7 +329,11 @@ int obj_init(unsigned char* buf, int width, int height, int pitch)
     buf_full = pitch;
 
     dudeFid = art_id(OBJ_TYPE_CRITTER, art_vault_guy_num, 0, 0, 0);
-    obj_new(&obj_dude, dudeFid, 0x1000000);
+    if (obj_new(&obj_dude, dudeFid, 0x1000000) == -1) {
+        debug_printf("\n  Error: Can't create Player object!");
+        obj_dude = NULL;
+        goto fail_text_object;
+    }
 
     obj_dude->flags |= OBJECT_NO_REMOVE;
     obj_dude->flags |= OBJECT_NO_SAVE;
@@ -343,7 +347,20 @@ int obj_init(unsigned char* buf, int width, int height, int pitch)
     }
 
     eggFid = art_id(OBJ_TYPE_INTERFACE, 2, 0, 0, 0);
-    obj_new(&obj_egg, eggFid, -1);
+    if (obj_new(&obj_egg, eggFid, -1) == -1) {
+        debug_printf("\n  Error: Can't create egg object!");
+        obj_egg = NULL;
+
+        // Drop the player from party slot 0 first, so the party list never
+        // holds a pointer to the destroyed object.
+        partyMemberDropPlayer(obj_dude);
+        if (obj_erase_object(obj_dude, NULL) == -1) {
+            debug_printf("\n  Error: Can't destroy Player object!");
+        }
+        obj_dude = NULL;
+        goto fail_text_object;
+    }
+
     obj_egg->flags |= OBJECT_NO_REMOVE;
     obj_egg->flags |= OBJECT_NO_SAVE;
     obj_egg->flags |= OBJECT_HIDDEN;
@@ -352,27 +369,38 @@ int obj_init(unsigned char* buf, int width, int height, int pitch)
     objInitialized = true;
 
     return 0;
+
+fail_text_object:
+    obj_blend_table_exit();
+    text_object_exit();
+fail_light:
+    light_exit();
+fail_render_table:
+    obj_render_table_exit();
+fail_order_table:
+    obj_order_table_exit();
+fail_offset_table:
+    obj_offset_table_exit();
+    return -1;
 }
 
 // 0x47A810
-void obj_reset()
+int obj_reset()
 {
     if (objInitialized) {
+        if (obj_remove_all() != 0) return -1;
         text_object_reset();
-        obj_remove_all();
         memset(obj_seen, 0, 5001);
         light_reset();
     }
+    return 0;
 }
 
 // 0x47A840
-void obj_exit()
+int obj_exit()
 {
     if (objInitialized) {
-        obj_dude->flags &= ~OBJECT_NO_REMOVE;
-        obj_egg->flags &= ~OBJECT_NO_REMOVE;
-
-        obj_remove_all();
+        if (obj_remove_all(true) != 0) return -1;
         text_object_exit();
 
         // NOTE: Uninline.
@@ -388,6 +416,7 @@ void obj_exit()
 
         obj_offset_table_exit();
     }
+    return 0;
 }
 
 // 0x47A904
@@ -441,6 +470,14 @@ int obj_load(DB_FILE* stream)
 {
     int rc = obj_load_func(stream);
 
+    if (rc != 0 && preload_list != NULL) {
+        // Only obj_load_func fills the list and obj_preload_art_cache (called
+        // by the map loader after a successful load) consumes it.
+        mem_free(preload_list);
+        preload_list = NULL;
+        preload_list_index = 0;
+    }
+
     fix_violence_level = -1;
 
     return rc;
@@ -469,6 +506,7 @@ static int obj_load_func(DB_FILE* stream)
 
     if (preload_list != NULL) {
         mem_free(preload_list);
+        preload_list = NULL;
     }
 
     if (objectCount != 0) {
@@ -536,29 +574,40 @@ static int obj_load_func(DB_FILE* stream)
             if (inventory->length != 0) {
                 inventory->items = (InventoryItem*)mem_malloc(sizeof(InventoryItem) * inventory->capacity);
                 if (inventory->items == NULL) {
+                    // The parent stays in the object list. No slot exists, so
+                    // obj_inven_free must not walk any.
+                    inventory->length = 0;
+                    inventory->capacity = 0;
                     return -1;
                 }
 
                 for (int inventoryItemIndex = 0; inventoryItemIndex < inventory->length; inventoryItemIndex++) {
                     InventoryItem* inventoryItem = &(inventory->items[inventoryItemIndex]);
+                    // On failure, only the slots before this one are filled.
+                    // Cut the length so obj_inven_free never walks an unfilled slot.
                     if (db_freadInt(stream, &(inventoryItem->quantity)) != 0) {
                         debug_printf("Error loading inventory\n");
+                        inventory->length = inventoryItemIndex;
                         return -1;
                     }
 
                     if (fixMapInventory) {
-                        inventoryItem->item = (Object*)mem_malloc(sizeof(Object));
-                        if (inventoryItem->item == NULL) {
+                        if (obj_create_object(&(inventoryItem->item)) == -1) {
                             debug_printf("Error loading inventory\n");
+                            inventory->length = inventoryItemIndex;
                             return -1;
                         }
 
                         if (obj_read_obj(inventoryItem->item, stream) != 0) {
                             debug_printf("Error loading inventory\n");
+                            obj_destroy_object(&(inventoryItem->item));
+                            inventory->length = inventoryItemIndex;
                             return -1;
                         }
                     } else {
-                        if (obj_load_obj(stream, &(inventoryItem->item), elevation, objectListNode->obj) == -1) {
+                        if (obj_load_obj(stream, &(inventoryItem->item), elevation, objectListNode->obj) != 0) {
+                            // obj_load_obj freed the child and set the slot to NULL.
+                            inventory->length = inventoryItemIndex;
                             return -1;
                         }
                     }
@@ -1066,7 +1115,7 @@ int obj_copy(Object** a1, Object* a2)
 // 0x47BB90
 int obj_connect(Object* object, int tile, int elevation, Rect* rect)
 {
-    if (object == NULL) {
+    if (object == NULL || obj_is_destroying(object)) {
         return -1;
     }
 
@@ -1958,70 +2007,73 @@ int obj_toggle_flat(Object* object, Rect* rect)
     return 0;
 }
 
+// Lives outside reset state. Detached batches remain privately owned while
+// nested teardown or DESTROY scripts replace the world.
+static ObjectTeardownHooks object_teardown_hooks()
+{
+    ObjectTeardownHooks hooks;
+    hooks.epoch = world_sim_epoch;
+    hooks.scriptIdentity = [](int sid) -> uint64_t {
+        Script* script;
+        return scr_ptr(sid, &script) == 0 ? script->runtimeIdentity.incarnation : 0;
+    };
+    hooks.destroyScript = [](int sid) { exec_script_proc(sid, SCRIPT_PROC_DESTROY); };
+    hooks.releaseScript = [](int sid) { scr_remove(sid); };
+    hooks.disposeObject = [](Object* object) { obj_destroy_object(&object); };
+    hooks.disposeNode = [](ObjectListNode* node) { obj_destroy_object_node(&node); };
+    hooks.disposeInventory = [](InventoryItem* items) { mem_free(items); };
+    hooks.bound = obj_bound;
+    hooks.invalidateIterators = [] {
+        // Public find-next calls must not follow a detached/freed list node.
+        // Cancel cached rendering references before any callback can redraw.
+        find_ptr = NULL;
+        find_tile = HEX_GRID_SIZE;
+        find_elev = 0;
+        outlineCount = 0;
+        memset(outlinedObjects, 0, sizeof(outlinedObjects));
+        if (renderTable != NULL) memset(renderTable, 0, sizeof(*renderTable) * updateHexArea);
+    };
+    return hooks;
+}
+
+static ObjectTeardown& object_teardown()
+{
+    static ObjectTeardown teardown(object_registry(), objectTable, HEX_GRID_SIZE, floatingObjects, object_teardown_hooks());
+    return teardown;
+}
+
+bool obj_is_destroying(const Object* object)
+{
+    return object_teardown().destroying(object);
+}
+
 // 0x47CCE4
 int obj_erase_object(Object* object, Rect* rect)
 {
-    if (object == NULL) {
+    return obj_erase_object_with_commit(object, rect, {});
+}
+
+int obj_erase_object_with_commit(Object* object, Rect* rect, const std::function<int()>& beforeDetach)
+{
+    // The lookup never reads a stale address. A claimed original stays live
+    // until its batch releases it; repeating its destruction is a no-op.
+    if (object_teardown().destroying(object)) return object_teardown().erase(object, {}, rect);
+    if (!object_registry().handleFor(object).valid()) {
+        if (rect != NULL) *rect = {};
         return -1;
     }
-
-    gmouse_remove_item_outline(object);
-
     ObjectListNode* node;
-    ObjectListNode* previousNode;
-    if (obj_node_ptr(object, &node, &previousNode) == 0) {
-        if (obj_adjust_light(object, 1, rect) == -1) {
-            if (rect != NULL) {
-                obj_bound(object, rect);
-            }
-        }
-
-        if (obj_remove(node, previousNode) != 0) {
-            return -1;
-        }
-
-        return 0;
-    }
-
-    // NOTE: Uninline.
-    if (obj_create_object_node(&node) == -1) {
-        return -1;
-    }
-
-    node->obj = object;
-
-    if (obj_remove(node, node) == -1) {
-        return -1;
-    }
-
-    return 0;
+    const bool linked = obj_node_ptr(object, &node, NULL) == 0;
+    return object_teardown().erase(object, [&] {
+        gmouse_remove_item_outline(object);
+        if (linked && obj_adjust_light(object, 1, rect) == -1 && rect != NULL)
+            obj_bound(object, rect); }, rect, beforeDetach);
 }
 
 // 0x47CD98
 int obj_inven_free(Inventory* inventory)
 {
-    for (int index = 0; index < inventory->length; index++) {
-        InventoryItem* inventoryItem = &(inventory->items[index]);
-
-        ObjectListNode* node;
-        // NOTE: Uninline.
-        obj_create_object_node(&node);
-
-        node->obj = inventoryItem->item;
-        node->obj->flags &= ~OBJECT_NO_REMOVE;
-        obj_remove(node, node);
-
-        inventoryItem->item = NULL;
-    }
-
-    if (inventory->items != NULL) {
-        mem_free(inventory->items);
-        inventory->items = NULL;
-        inventory->capacity = 0;
-        inventory->length = 0;
-    }
-
-    return 0;
+    return inventory != NULL ? object_teardown().inventory(*inventory) : -1;
 }
 
 // 0x47CE34
@@ -2048,42 +2100,18 @@ Object* obj_top_environment(Object* object)
 }
 
 // 0x47CE78
-void obj_remove_all()
+int obj_remove_all(bool includeProtected)
 {
-    ObjectListNode* node;
-    ObjectListNode* prev;
-    ObjectListNode* next;
-
-    scr_remove_all();
-
-    for (int tile = 0; tile < HEX_GRID_SIZE; tile++) {
-        node = objectTable[tile];
-        prev = NULL;
-
-        while (node != NULL) {
-            next = node->next;
-            if (obj_remove(node, prev) == -1) {
-                prev = node;
-            }
-            node = next;
-        }
-    }
-
-    node = floatingObjects;
-    prev = NULL;
-
-    while (node != NULL) {
-        next = node->next;
-        if (obj_remove(node, prev) == -1) {
-            prev = node;
-        }
-        node = next;
-    }
-
+    // Preflight the whole set before removing scripts or changing any list.
+    // A failed allocation leaves every original list/inventory untouched.
+    const uint64_t epoch = world_sim_epoch();
+    if (object_teardown().all([] { scr_remove_all(); }, includeProtected ? obj_dude : nullptr, includeProtected ? obj_egg : nullptr) != 0) return -1;
+    if (world_sim_epoch() != epoch) return -1;
     obj_last_roof_y = -1;
     obj_last_elev = -1;
     obj_last_is_empty = true;
     obj_last_roof_x = -1;
+    return 0;
 }
 
 // 0x47CF08
@@ -3301,6 +3329,8 @@ int obj_load_obj(DB_FILE* stream, Object** objectPtr, int elevation, Object* own
     }
 
     if (obj_read_obj(obj, stream) != 0) {
+        // The inventory fields hold unread file data: destroy only the object.
+        obj_destroy_object(&obj);
         *objectPtr = NULL;
         return -1;
     }
@@ -3318,8 +3348,20 @@ int obj_load_obj(DB_FILE* stream, Object** objectPtr, int elevation, Object* own
 
     if (!art_fid_valid(obj->fid)) {
         debug_printf("\nError: invalid object art fid: %u\n", obj->fid);
+
+        // The script was pointed at this object a few lines above. The
+        // inventory fields still hold unread file data, so only the owner is
+        // cleared here and not the whole object through obj_load_discard().
+        if (obj->sid != -1) {
+            Script* script;
+            if (scr_ptr(obj->sid, &script) != -1 && script->owner == obj) {
+                script->owner = NULL;
+            }
+        }
+
         // NOTE: Uninline.
         obj_destroy_object(&obj);
+        *objectPtr = NULL;
         return -2;
     }
 
@@ -3341,16 +3383,20 @@ int obj_load_obj(DB_FILE* stream, Object** objectPtr, int elevation, Object* own
 
     InventoryItem* inventoryItems = inventory->items = (InventoryItem*)mem_malloc(sizeof(*inventoryItems) * inventory->capacity);
     if (inventoryItems == NULL) {
+        obj_load_discard(&obj);
+        *objectPtr = NULL;
         return -1;
     }
 
     for (int inventoryItemIndex = 0; inventoryItemIndex < inventory->length; inventoryItemIndex++) {
         InventoryItem* inventoryItem = &(inventoryItems[inventoryItemIndex]);
-        if (db_freadInt(stream, &(inventoryItem->quantity)) != 0) {
-            return -1;
-        }
-
-        if (obj_load_obj(stream, &(inventoryItem->item), elevation, obj) != 0) {
+        if (db_freadInt(stream, &(inventoryItem->quantity)) != 0
+            || obj_load_obj(stream, &(inventoryItem->item), elevation, obj) != 0) {
+            // Slots before this one are filled. A failed child already freed
+            // itself and set its slot to NULL.
+            inventory->length = inventoryItemIndex;
+            obj_load_discard(&obj);
+            *objectPtr = NULL;
             return -1;
         }
     }
@@ -3391,8 +3437,12 @@ int obj_load_dude(DB_FILE* stream)
 
     scr_clear_dude_script();
 
-    Object* temp;
+    Object* temp = NULL;
     int rc = obj_load_obj(stream, &temp, -1, NULL);
+    if (rc != 0 || temp == NULL) {
+        scr_set_dude_script();
+        return -1;
+    }
 
     memcpy(obj_dude, temp, sizeof(*obj_dude));
 
@@ -3479,6 +3529,12 @@ static int obj_create_object(Object** objectPtr)
     object->owner = NULL;
     object->field_80 = -1;
 
+    if (!object_registry().create(object).valid()) {
+        mem_free(object);
+        *objectPtr = NULL;
+        return -1;
+    }
+
     return 0;
 }
 
@@ -3493,9 +3549,44 @@ static void obj_destroy_object(Object** objectPtr)
         return;
     }
 
+    object_registry().destroy(*objectPtr);
+
     mem_free(*objectPtr);
 
     *objectPtr = NULL;
+}
+
+// Frees an object that obj_load_obj built but never published, with every
+// child in its inventory. The object is in no list. `length` must count only
+// filled slots.
+static void obj_load_discard(Object** objectPtr)
+{
+    Object* obj = *objectPtr;
+    if (obj == NULL) {
+        return;
+    }
+
+    if (obj->sid != -1) {
+        Script* script;
+        if (scr_ptr(obj->sid, &script) != -1 && script->owner == obj) {
+            script->owner = NULL;
+        }
+    }
+
+    Inventory* inventory = &(obj->data.inventory);
+    if (inventory->items != NULL) {
+        for (int index = 0; index < inventory->length; index++) {
+            obj_load_discard(&(inventory->items[index].item));
+        }
+
+        mem_free(inventory->items);
+        inventory->items = NULL;
+    }
+
+    inventory->length = 0;
+    inventory->capacity = 0;
+
+    obj_destroy_object(objectPtr);
 }
 
 // 0x47EEFC
@@ -3637,46 +3728,6 @@ static void obj_insert(ObjectListNode* objectListNode)
 
     objectListNode->next = *objectListNodePtr;
     *objectListNodePtr = objectListNode;
-}
-
-// 0x47F13C
-static int obj_remove(ObjectListNode* a1, ObjectListNode* a2)
-{
-    if (a1->obj == NULL) {
-        return -1;
-    }
-
-    if ((a1->obj->flags & OBJECT_NO_REMOVE) != 0) {
-        return -1;
-    }
-
-    obj_inven_free(&(a1->obj->data.inventory));
-
-    if (a1->obj->sid != -1) {
-        exec_script_proc(a1->obj->sid, SCRIPT_PROC_DESTROY);
-        scr_remove(a1->obj->sid);
-    }
-
-    if (a1 != a2) {
-        if (a2 != NULL) {
-            a2->next = a1->next;
-        } else {
-            int tile = a1->obj->tile;
-            if (tile == -1) {
-                floatingObjects = floatingObjects->next;
-            } else {
-                objectTable[tile] = objectTable[tile]->next;
-            }
-        }
-    }
-
-    // NOTE: Uninline.
-    obj_destroy_object(&(a1->obj));
-
-    // NOTE: Uninline.
-    obj_destroy_object_node(&a1);
-
-    return 0;
 }
 
 // 0x47F20C
@@ -4924,6 +4975,16 @@ static int obj_preload_sort(const void* a1, const void* a2)
 
     cmp = ((v1 & 0xFF0000) >> 16) - (((v2 & 0xFF0000) >> 16));
     return cmp;
+}
+
+ObjectHandle obj_handle(const Object* object)
+{
+    return object_registry().handleFor(object);
+}
+
+Object* obj_resolve(ObjectHandle handle)
+{
+    return static_cast<Object*>(object_registry().resolve(handle));
 }
 
 } // namespace fallout

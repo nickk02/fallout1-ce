@@ -2310,7 +2310,7 @@ static int DummyFunc(DB_FILE* stream)
 // 0x471448
 static int PrepLoad(DB_FILE* stream)
 {
-    game_reset();
+    if (game_reset() != 0) return -1;
     map_data.name[0] = '\0';
     set_game_time(LSData[slot_cursor].gameTime);
     return 0;
@@ -2484,7 +2484,7 @@ static int SlotMap2Game(DB_FILE* stream)
         return -1;
     }
 
-    if (map_load_in_game(LSData[slot_cursor].fileName) == -1) {
+    if (map_load_in_game(LSData[slot_cursor].fileName) != 0) {
         debug_printf("LOADSAVE: returning 13\n");
         return -1;
     }

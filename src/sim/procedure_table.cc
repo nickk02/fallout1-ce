@@ -38,6 +38,16 @@ void procedure_table_shift_timed(unsigned char* table, size_t entrySize, uint32_
     }
 }
 
+void procedure_table_schedule_timed(unsigned char* table, size_t entrySize, uint32_t timedFlag, uint32_t index, int32_t delaySeconds, uint32_t now, bool paused, uint32_t pauseOrigin)
+{
+    unsigned char* entry = table + 4 + static_cast<size_t>(index) * entrySize;
+
+    uint64_t base = paused ? pauseOrigin : now;
+    uint64_t delay = static_cast<uint64_t>(static_cast<int64_t>(delaySeconds) * 1000);
+    store(entry, kDeadlineOffset, static_cast<uint32_t>(base + delay));
+    store(entry, kFlagsOffset, load(entry, kFlagsOffset) | timedFlag);
+}
+
 uint32_t interpreter_units(uint32_t duration, uint32_t tick)
 {
     if (tick == 0) {

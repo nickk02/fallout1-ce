@@ -8,6 +8,8 @@
 
 namespace fallout {
 
+enum class CommandContext;
+
 typedef void(IdleFunc)();
 typedef void(FocusFunc)(int);
 typedef void(BackgroundProcess)();
@@ -17,6 +19,10 @@ typedef int(ScreenDumpFunc)(int width, int height, unsigned char* buffer, unsign
 int GNW_input_init(int use_msec_timer);
 void GNW_input_exit();
 int get_input();
+
+// Like get_input(), but the pump runs in the given command context. Only the
+// world loops ask for CommandContext::World. get_input() is an Other pump.
+int get_input_in(CommandContext context);
 void get_input_position(int* x, int* y);
 void process_bk();
 void GNW_add_input_buffer(int a1);

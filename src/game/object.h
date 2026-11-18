@@ -1,9 +1,12 @@
 #ifndef FALLOUT_GAME_OBJECT_H_
 #define FALLOUT_GAME_OBJECT_H_
 
+#include <functional>
+
 #include "game/inventry.h"
 #include "game/map_defs.h"
 #include "game/object_types.h"
+#include "object_handle.h"
 #include "plib/db/db.h"
 #include "plib/gnw/rect.h"
 
@@ -26,8 +29,8 @@ extern Object* obj_egg;
 extern Object* obj_dude;
 
 int obj_init(unsigned char* buf, int width, int height, int pitch);
-void obj_reset();
-void obj_exit();
+int obj_reset();
+int obj_exit();
 int obj_load(DB_FILE* stream);
 int obj_save(DB_FILE* stream);
 void obj_render_pre_roof(Rect* rect, int elevation);
@@ -59,10 +62,13 @@ int obj_turn_on_outline(Object* obj, Rect* rect);
 int obj_turn_off_outline(Object* obj, Rect* rect);
 int obj_toggle_flat(Object* obj, Rect* rect);
 int obj_erase_object(Object* a1, Rect* a2);
+int obj_erase_object_with_commit(Object* object, Rect* rect, const std::function<int()>& beforeDetach);
+// A detached teardown batch still owns this exact live allocation.
+bool obj_is_destroying(const Object* object);
 int obj_inven_free(Inventory* inventory);
 bool obj_action_can_talk_to(Object* obj);
 Object* obj_top_environment(Object* obj);
-void obj_remove_all();
+int obj_remove_all(bool includeProtected = false);
 Object* obj_find_first();
 Object* obj_find_next();
 Object* obj_find_first_at(int elevation);
@@ -94,6 +100,8 @@ int obj_load_obj(DB_FILE* stream, Object** objectPtr, int elevation, Object* own
 int obj_save_dude(DB_FILE* stream);
 int obj_load_dude(DB_FILE* stream);
 void obj_fix_violence_settings(int* fid);
+ObjectHandle obj_handle(const Object* object);
+Object* obj_resolve(ObjectHandle handle);
 
 } // namespace fallout
 

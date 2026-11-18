@@ -83,6 +83,22 @@ struct CampaignAdvanceResult {
 // call, so the limits and the stop request apply between events.
 CampaignAdvanceResult advanceCampaignTime(CampaignQueue& queue, uint32_t target, const CampaignAdvanceOptions& options = CampaignAdvanceOptions());
 
+// Runs the events that are due at the current game time, and nothing else. The
+// game time is never changed. Events that handlers schedule for a time not after
+// the current one are run too. Each event is one processNext() call, and the
+// stop request is checked before each one, so it also sees what the last handler
+// changed.
+//
+// Unlike advanceCampaignTime() this runs already-due events whatever the target,
+// which is what a caller needs after something else moved the game time.
+//
+// Status: Reached when nothing is due any more, Stopped when the stop request
+// came first, NoProgress when more than maxEvents events were due (the rest stay
+// queued), Interrupted when processNext() returned nonzero. `slices` stays 0.
+// The times are compared as unsigned values, so a queue whose own times are
+// signed must map them first (an overdue negative deadline to 0).
+CampaignAdvanceResult drainDueEvents(CampaignQueue& queue, const CampaignAdvanceOptions& options = CampaignAdvanceOptions());
+
 // Same, for `delta` ticks from the current time.
 CampaignAdvanceResult advanceCampaignBy(CampaignQueue& queue, uint32_t delta, const CampaignAdvanceOptions& options = CampaignAdvanceOptions());
 

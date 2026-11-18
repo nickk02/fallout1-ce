@@ -258,3 +258,53 @@ TEST(modal_pause_moved_modal_keeps_the_single_claim)
     CHECK(!fake.animPaused);
     CHECK_EQ(fake.shifts.size(), 1u);
 }
+
+TEST(modal_pause_mode_2_dialogue_with_nested_barter_thaws_and_shifts_once)
+{
+    Scope scope;
+    world_sim_init(WORLD_SIM_OWNED, makePlatform());
+
+    fake.now = 0;
+    fake.pump();
+    fake.now = 100;
+    fake.pump();
+    uint64_t before = world_sim_tick_count();
+
+    // gdialog_enter takes its pause, then the talk script runs and the pump
+    // keeps running from the dialogue loop.
+    fake.now = 1000;
+    ModalPause dialogue;
+    CHECK(fake.animPaused);
+    CHECK_EQ(fake.animCalls, 1);
+
+    for (unsigned int t = 1007; t <= 2000; t += 7) {
+        fake.now = t;
+        fake.pump();
+    }
+    CHECK_EQ(world_sim_tick_count(), before);
+
+    // Barter opens and closes inside the dialogue. No thaw, no shift.
+    fake.now = 2100;
+    {
+        ModalPause barter;
+        fake.now = 2600;
+    }
+    CHECK(fake.animPaused);
+    CHECK_EQ(fake.animCalls, 1);
+    CHECK_EQ(fake.shifts.size(), 0u);
+    CHECK(world_sim_world_paused());
+
+    // More dialogue, then gdialog_enter returns.
+    fake.now = 4000;
+    dialogue.release();
+    CHECK(!fake.animPaused);
+    CHECK_EQ(fake.animCalls, 2);
+    CHECK_EQ(fake.shifts.size(), 1u);
+    CHECK_EQ(fake.shifts[0], 3000u);
+    CHECK(!world_sim_world_paused());
+
+    // The first pump after the dialogue counts nothing.
+    fake.now = 4007;
+    fake.pump();
+    CHECK_EQ(world_sim_tick_count(), before);
+}

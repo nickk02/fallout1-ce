@@ -265,3 +265,141 @@ TEST(interpreter_units_scales_other_ticks_past_the_wrap)
     // A timer in 1/100 s: 5,000,000 ticks is 50,000,000 ms.
     CHECK_EQ(interpreter_units(5000000, 100), 50000000u);
 }
+
+namespace {
+
+// The interpreter's two steps for a timed procedure: schedule, then shift on
+// resume. `origin` is the reading when the suspension began, `end` when it
+// ended, both in interpreter units.
+void schedule(Table& table, uint32_t index, int32_t seconds, uint32_t now, bool paused, uint32_t origin)
+{
+    procedure_table_schedule_timed(table.data.data(), kEntrySize, kTimed, index, seconds, now, paused, origin);
+}
+
+uint32_t deadline(const Table& table, uint32_t index) { return get(table.data, table.entry(index) + 8); }
+
+} // namespace
+
+TEST(procedure_schedule_outside_a_suspension_counts_from_now)
+{
+    Table table(2);
+    table.set(0, 0, 0xAAAAAAAAu);
+    table.set(1, kConditional, 0xBBBBBBBBu);
+
+    schedule(table, 1, 3, 10000, false, 777);
+
+    CHECK_EQ(deadline(table, 1), 13000u);
+    CHECK_EQ(get(table.data, table.entry(1) + 4), kConditional | kTimed);
+    CHECK_EQ(deadline(table, 0), 0xAAAAAAAAu);
+    CHECK_EQ(get(table.data, table.entry(1)), 0x22222222u);
+    CHECK_EQ(get(table.data, table.guard()), 0xDEADBEEFu);
+}
+
+TEST(procedure_schedule_before_midway_and_late_in_a_suspension_all_end_after_the_resume)
+{
+    // The suspension runs from 5000 to 9000 (4000 long).
+    const uint32_t origin = 5000;
+    const uint32_t length = 4000;
+
+    Table table(3);
+    for (uint32_t i = 0; i < 3; i++) {
+        table.set(i, 0, 0);
+    }
+
+    // Before the suspension: counted from its own time, 4000.
+    schedule(table, 0, 2, 4000, false, 0);
+
+    // Midway (6500) and late (8800), both inside the suspension.
+    schedule(table, 1, 2, 6500, true, origin);
+    schedule(table, 2, 2, 8800, true, origin);
+
+    procedure_table_shift_timed(table.data.data(), kEntrySize, kTimed, length);
+
+    // Set at 4000 for 2 s, so due at 6000. 1000 was left at the start of the
+    // suspension, so 1000 is left after the resume at 9000.
+    CHECK_EQ(deadline(table, 0), 10000u);
+
+    // Both in-suspension entries end exactly 2000 after the resume at 9000.
+    CHECK_EQ(deadline(table, 1), 11000u);
+    CHECK_EQ(deadline(table, 2), 11000u);
+}
+
+TEST(procedure_schedule_old_and_new_programs_in_one_suspension_agree)
+{
+    // A program loaded midway has its own table. The same origin and the same
+    // shift give the same result as for an old program.
+    Table oldProgram(1);
+    Table newProgram(1);
+    oldProgram.set(0, 0, 0);
+    newProgram.set(0, 0, 0);
+
+    schedule(oldProgram, 0, 5, 7000, true, 5000);
+    schedule(newProgram, 0, 5, 8000, true, 5000);
+
+    procedure_table_shift_timed(oldProgram.data.data(), kEntrySize, kTimed, 4000);
+    procedure_table_shift_timed(newProgram.data.data(), kEntrySize, kTimed, 4000);
+
+    CHECK_EQ(deadline(oldProgram, 0), 14000u);
+    CHECK_EQ(deadline(newProgram, 0), 14000u);
+}
+
+TEST(procedure_schedule_nested_suspensions_share_the_outer_origin)
+{
+    // The origin is taken when the count goes 0 to 1 and not again for a nested
+    // one, so an entry set in the inner suspension uses the same origin and the
+    // single shift of the outer one.
+    Table table(1);
+    table.set(0, 0, 0);
+
+    schedule(table, 0, 1, 7000, true, 5000);
+    procedure_table_shift_timed(table.data.data(), kEntrySize, kTimed, 5000);
+
+    CHECK_EQ(deadline(table, 0), 11000u);
+}
+
+TEST(procedure_schedule_after_an_origin_reset_uses_the_new_origin)
+{
+    // A load inside the suspension moves the origin to 8000. Entries set after
+    // it are shifted only by the time from the new origin (1000).
+    Table table(1);
+    table.set(0, 0, 0);
+
+    schedule(table, 0, 2, 8500, true, 8000);
+    procedure_table_shift_timed(table.data.data(), kEntrySize, kTimed, 1000);
+
+    CHECK_EQ(deadline(table, 0), 11000u);
+}
+
+TEST(procedure_schedule_uses_64_bit_seconds_and_wraps_in_the_32_bit_domain)
+{
+    Table table(3);
+    for (uint32_t i = 0; i < 3; i++) {
+        table.set(i, 0, 0);
+    }
+
+    // 4,000,000 s * 1000 does not fit in 32 bits; the sum wraps once.
+    schedule(table, 0, 4000000, 1000, false, 0);
+    CHECK_EQ(deadline(table, 0), static_cast<uint32_t>(4000000000ull + 1000));
+
+    // The largest delay: INT32_MAX seconds.
+    schedule(table, 1, 2147483647, 0, false, 0);
+    CHECK_EQ(deadline(table, 1), static_cast<uint32_t>(2147483647ull * 1000));
+
+    // A deadline set near the top of the domain wraps to a small number.
+    schedule(table, 2, 5, 0xFFFFFF00u, false, 0);
+    CHECK_EQ(deadline(table, 2), static_cast<uint32_t>(0xFFFFFF00ull + 5000));
+}
+
+TEST(procedure_schedule_accepts_zero_and_negative_delays)
+{
+    Table table(2);
+    table.set(0, 0, 0);
+    table.set(1, 0, 0);
+
+    schedule(table, 0, 0, 12345, false, 0);
+    CHECK_EQ(deadline(table, 0), 12345u);
+
+    // Like the old int arithmetic: now - 2000, due at once.
+    schedule(table, 1, -2, 12345, false, 0);
+    CHECK_EQ(deadline(table, 1), 10345u);
+}

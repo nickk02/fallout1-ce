@@ -6,6 +6,7 @@
 #include "game/object_types.h"
 #include "int/intrpret.h"
 #include "plib/db/db.h"
+#include "sim/script_binding.h"
 
 namespace fallout {
 
@@ -124,6 +125,7 @@ typedef struct Script {
     int field_D4;
     int field_D8;
     int field_DC;
+    ScriptRuntimeIdentity runtimeIdentity;
 } Script;
 
 extern int num_script_indexes;
@@ -140,6 +142,9 @@ void inc_game_time_in_seconds(int inc);
 void set_game_time(int time);
 void scr_rebase_timed_events(unsigned int now);
 void set_game_time_in_seconds(int time);
+// Pending and dropped ticks of the owned calendar, and the name of its last
+// pull status. Read-only, for diagnostics.
+void scr_calendar_stats(unsigned int* pending, unsigned long long* dropped, const char** status);
 int gtime_q_add();
 int gtime_q_process(Object* obj, void* data);
 int scr_map_q_process(Object* obj, void* data);
@@ -199,6 +204,7 @@ int scr_remove_all();
 int scr_remove_all_force();
 Script* scr_find_first_at(int elevation);
 Script* scr_find_next_at();
+bool scr_calendar_owned();
 bool scr_spatials_enabled();
 void scr_spatials_enable();
 void scr_spatials_disable();

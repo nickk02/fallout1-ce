@@ -8,6 +8,7 @@ namespace fallout {
 
 int partyMemberAdd(Object* object);
 int partyMemberRemove(Object* object);
+void partyMemberDropPlayer(Object* player);
 int partyMemberPrepSave();
 int partyMemberUnPrepSave();
 int partyMemberSave(DB_FILE* stream);

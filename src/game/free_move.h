@@ -3,6 +3,19 @@
 
 namespace fallout {
 
+struct Object;
+// Legacy registration/clear relinquishes movement without writing a pose.
+void free_move_yield(Object* actor);
+// Discard stale ownership at shared movement entry, without writing a pose.
+void free_move_validate_owner();
+
+bool free_move_uses_sim_ticks();
+void free_move_sim_sample(float x, float y, bool running);
+void free_move_sim_tick();
+void free_move_sim_cancel();
+// Dispatches a door interaction requested by collision, outside the tick.
+bool free_move_dispatch_pending();
+
 // Moves the player a little in the given screen direction (unit length or
 // shorter). Unlike a walk along hex steps, the player glides in any direction,
 // crossing from one hex into the next as it goes. Returns `false` if the player
@@ -15,9 +28,13 @@ void free_move_stop();
 // A pause of `elapsed` ms just ended. Moves the timers of a walk in progress.
 void free_move_world_resumed(unsigned int elapsed);
 
-// Walks toward `tile` the way the keys do: a click on the ground. The walk ends
-// on arrival, when the way is blocked for a moment, or when anything calls
-// `free_move_stop` or `free_move_goto_cancel`.
+// Walks toward `tile`: a click on the ground. A click is a new intent and ends
+// any earlier walk first. With owned simulation ticks the walk follows the hex
+// pathfinder's route, plans through unlocked doors, replans a few times when
+// blocked, and a click on an unreachable or the current tile leaves the player
+// standing. Otherwise it steers straight at the tile. The walk ends on arrival,
+// when it is blocked for good, or when anything calls `free_move_stop` or
+// `free_move_goto_cancel`.
 void free_move_goto(int tile, bool running);
 
 // `true` while a walk to a tile is under way.
