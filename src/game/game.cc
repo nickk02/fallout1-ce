@@ -38,6 +38,7 @@
 #include "game/roll.h"
 #include "game/scripts.h"
 #include "game/select.h"
+#include "game/sim_service.h"
 #include "game/skill.h"
 #include "game/skilldex.h"
 #include "game/stat.h"
@@ -57,6 +58,8 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -163,6 +166,9 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     video_options.fitWidth = true;
     video_options.scaleFilter = 5;
 
+    // 0 existing scheduler, 1 shadow, 2 owned pauses. See sim/world_sim.h.
+    int worldSimMode = 0;
+
     Config resolutionConfig;
     if (config_init(&resolutionConfig)) {
         if (config_load(&resolutionConfig, "f1_res.ini", false)) {
@@ -191,6 +197,8 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
             if (configGetBool(&resolutionConfig, "MAIN", "REALTIME_COMBAT", &realtimeCombat)) {
                 combat_set_realtime(realtimeCombat);
             }
+
+            config_get_value(&resolutionConfig, "MAIN", "WORLD_SIM", &worldSimMode);
 
             int deadZone = 20;
             int cursorSpeed = 600;
@@ -377,12 +385,17 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
 
     debug_printf(">init_options_menu\n");
 
+    // Last, so that none of the many early returns above leaves the pump or the
+    // focus callback installed. The input system has existed since initWindow().
+    sim_service_init(worldSimMode);
+
     return 0;
 }
 
 // 0x43B5A8
-void game_reset()
+int game_reset()
 {
+    world_sim_reset();
     tile_disable_refresh();
     palette_reset();
     roll_reset();
@@ -401,7 +414,7 @@ void game_reset()
     movieStop();
     moviefx_reset();
     gmovie_reset();
-    iso_reset();
+    if (iso_reset() != 0) return -1;
     gmouse_reset();
     proto_reset();
     scr_reset();
@@ -416,11 +429,13 @@ void game_reset()
     game_user_wants_to_quit = 0;
     automap_reset();
     init_options_menu();
+    return 0;
 }
 
 // 0x43B654
-void game_exit()
+int game_exit()
 {
+    sim_service_exit();
     tile_disable_refresh();
     message_exit(&misc_message_file);
     combat_exit();
@@ -434,7 +449,7 @@ void game_exit()
     anim_exit();
     proto_exit();
     gmouse_exit();
-    iso_exit();
+    if (iso_exit() != 0) return -1;
     moviefx_exit();
     gmovie_exit();
     movieClose();
@@ -455,6 +470,7 @@ void game_exit()
     windowClose();
     db_exit();
     gconfig_exit(true);
+    return 0;
 }
 
 // 0x43B748
@@ -1143,6 +1159,7 @@ static void game_unload_info()
 // 0x43D130
 static void game_help()
 {
+    ModalPause modalPause;
     bool isoWasEnabled = map_disable_bk_processes();
     gmouse_3d_off();
 
@@ -1216,11 +1233,13 @@ static void game_help()
     if (isoWasEnabled) {
         map_enable_bk_processes();
     }
+    modalPause.release();
 }
 
 // 0x43D274
 int game_quit_with_confirm()
 {
+    ModalPause modalPause;
     bool isoWasEnabled = map_disable_bk_processes();
 
     bool gameMouseWasVisible;
@@ -1269,6 +1288,7 @@ int game_quit_with_confirm()
     if (isoWasEnabled) {
         map_enable_bk_processes();
     }
+    modalPause.release();
 
     return rc;
 }

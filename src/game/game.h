@@ -26,8 +26,8 @@ extern DB_DATABASE* master_db_handle;
 extern DB_DATABASE* critter_db_handle;
 
 int game_init(const char* windowTitle, bool isMapper, int font, int flags, int argc, char** argv);
-void game_reset();
-void game_exit();
+int game_reset();
+int game_exit();
 int game_handle_input(int eventCode, bool isInCombatMode);
 void game_ui_disable(int a1);
 void game_ui_enable();

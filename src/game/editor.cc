@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/art.h"
 #include "game/bmpdlog.h"
 #include "game/critter.h"
@@ -39,6 +41,7 @@
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -439,6 +442,9 @@ char byte_431D93[64];
 // 0x504F28
 static bool bk_enable = false;
 
+// Holds the world pause while the character editor is open.
+static std::optional<ModalPause> editor_pause;
+
 // 0x504F2C
 static int skill_cursor = 0;
 
@@ -639,6 +645,8 @@ int editor_design(bool isCreationMode)
 
     if (CharEditStart() == -1) {
         debug_printf("\n ** Error loading character editor data! **\n");
+        // Some error paths of CharEditStart do not reach RstrBckgProc.
+        editor_pause.reset();
         return -1;
     }
 
@@ -831,6 +839,7 @@ static int CharEditStart()
     trait_count = get_trait_count();
 
     if (!glblmode) {
+        editor_pause.emplace();
         bk_enable = map_disable_bk_processes();
     }
 
@@ -1421,6 +1430,7 @@ static void RstrBckgProc()
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    editor_pause.reset();
 
     cycle_enable();
 

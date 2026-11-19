@@ -196,6 +196,8 @@ void initInterpreter();
 void interpretClose();
 void interpretEnableInterpreter(int enabled);
 void interpret(Program* program, int a2);
+// `true` while any script program is executing, nested runs included.
+bool interpretIsRunning();
 void executeProc(Program* program, int procedureIndex);
 int interpretFindProcedure(Program* prg, const char* name);
 void executeProcedure(Program* program, int procedureIndex);
@@ -203,6 +205,7 @@ void runProgram(Program* program);
 Program* runScript(char* name);
 void interpretSetCPUBurstSize(int value);
 void updatePrograms();
+void updateProgram(Program* program);
 void clearPrograms();
 void clearTopProgram();
 char** getProgramList(int* programListLengthPtr);
@@ -211,6 +214,8 @@ void interpretAddFunc(int opcode, OpcodeHandler* handler);
 void interpretSetFilenameFunc(InterpretMangleFunc* func);
 void interpretSuspendEvents();
 void interpretResumeEvents();
+void interpretShiftWaits(unsigned int elapsed);
+void interpretRestartSuspension();
 int interpretSaveProgramState();
 int interpretLoadProgramState();
 

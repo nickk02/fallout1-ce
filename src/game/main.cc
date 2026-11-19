@@ -41,6 +41,7 @@
 #include "game/worldmap.h"
 #include "plib/color/color.h"
 #include "plib/gnw/debug.h"
+#include "plib/gnw/game_commands.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/input.h"
@@ -128,8 +129,7 @@ int gnw_main(int argc, char** argv)
                 if (select_character() == 2) {
                     gmovie_play(MOVIE_OVRINTRO, GAME_MOVIE_STOP_MUSIC);
                     roll_set_seed(-1);
-                    main_load_new(mainMap);
-                    main_game_loop();
+                    if (main_load_new(mainMap) == 0) main_game_loop();
                     palette_fade_to(white_palette);
 
                     // NOTE: Uninline.
@@ -239,9 +239,7 @@ static bool main_init_system(int argc, char** argv)
 // 0x472918
 static int main_reset_system()
 {
-    game_reset();
-
-    return 1;
+    return game_reset() == 0 ? 1 : 0;
 }
 
 // 0x472924
@@ -252,7 +250,7 @@ static void main_exit_system()
     // NOTE: Uninline.
     main_selfrun_exit();
 
-    game_exit();
+    if (game_exit() != 0) return;
 
     // TODO: Find a better place for this call.
     SDL_Quit();
@@ -275,13 +273,13 @@ static int main_load_new(char* mapFileName)
     map_init();
     gmouse_set_cursor(MOUSE_CURSOR_NONE);
     mouse_show();
-    map_load(mapFileName);
-    PlayCityMapMusic();
+    const int loaded = map_load(mapFileName);
+    if (loaded == 0) PlayCityMapMusic();
     palette_fade_to(white_palette);
     win_delete(win);
     loadColorTable("color.pal");
     palette_fade_to(cmap);
-    return 0;
+    return loaded;
 }
 
 // 0x472A04
@@ -331,7 +329,7 @@ static void main_game_loop()
         stick_move_update();
         combat_vats_update();
 
-        int keyCode = get_input();
+        int keyCode = get_input_in(CommandContext::World);
         if (keyCode == KEY_LOWERCASE_V || keyCode == KEY_UPPERCASE_V) {
             combat_vats_pause();
             keyCode = -1;
@@ -428,11 +426,13 @@ static void main_selfrun_record()
         roll_set_seed(0xBEEFFEED);
 
         // NOTE: Uninline.
-        main_reset_system();
+        if (!main_reset_system()) {
+            main_menu_create();
+            return;
+        }
 
         proto_dude_init("premade\\combat.gcd");
-        main_load_new(selfrunData.mapFileName);
-        selfrun_recording_loop(&selfrunData);
+        if (main_load_new(selfrunData.mapFileName) == 0) selfrun_recording_loop(&selfrunData);
         palette_fade_to(white_palette);
 
         // NOTE: Uninline.
@@ -470,11 +470,13 @@ static void main_selfrun_play()
             roll_set_seed(0xBEEFFEED);
 
             // NOTE: Uninline.
-            main_reset_system();
+            if (!main_reset_system()) {
+                main_menu_create();
+                return;
+            }
 
             proto_dude_init("premade\\combat.gcd");
-            main_load_new(selfrunData.mapFileName);
-            selfrun_playback_loop(&selfrunData);
+            if (main_load_new(selfrunData.mapFileName) == 0) selfrun_playback_loop(&selfrunData);
             palette_fade_to(white_palette);
 
             // NOTE: Uninline.

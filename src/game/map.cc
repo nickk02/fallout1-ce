@@ -40,6 +40,9 @@
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
+#include "sim/modal_pause.h"
+#include "sim/object_teardown.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -338,8 +341,9 @@ int iso_init()
 }
 
 // 0x473B04
-void iso_reset()
+int iso_reset()
 {
+    if (obj_reset() != 0) return -1;
     // NOTE: Uninline.
     map_free_global_vars();
 
@@ -348,17 +352,17 @@ void iso_reset()
 
     art_reset();
     tile_reset();
-    obj_reset();
     cycle_reset();
     intface_reset();
+    return 0;
 }
 
 // 0x473B64
-void iso_exit()
+int iso_exit()
 {
+    if (obj_exit() != 0) return -1;
     intface_exit();
     cycle_exit();
-    obj_exit();
     tile_exit();
     art_exit();
 
@@ -369,6 +373,7 @@ void iso_exit()
 
     // NOTE: Uninline.
     map_free_local_vars();
+    return 0;
 }
 
 // 0x473BD0
@@ -398,7 +403,7 @@ void map_init()
 // 0x473C80
 void map_reset()
 {
-    map_new_map();
+    if (map_new_map() != 0) return;
     add_bk_process(gmouse_bk_process);
     gmouse_disable(0);
     win_show(display_win);
@@ -828,19 +833,27 @@ char* map_file_path(char* name)
 }
 
 // 0x4744E4
-void map_new_map()
+int map_new_map()
 {
-    map_set_elevation(0);
-    tile_set_center(20100, TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
-    memset(&map_state, 0, sizeof(map_state));
-    map_data.enteringElevation = 0;
-    map_data.enteringRotation = 0;
-    map_data.localVariablesCount = 0;
-    map_data.version = 19;
-    map_data.name[0] = '\0';
-    map_data.enteringTile = 20100;
-    obj_remove_all();
+    // The map is being replaced. No pause is taken here: nothing below runs a
+    // script or waits for input, and the callers either hold one already or
+    // are not in a running game.
+    world_sim_invalidate();
+
+    // Animation sequences hold pointers to objects. Ending them runs the
+    // forced callbacks and reads each owner, so the objects have to be alive.
     anim_stop();
+    if (object_transition_after_clear([] { return obj_remove_all(); }, [] {
+            map_set_elevation(0);
+            tile_set_center(20100, TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+            memset(&map_state, 0, sizeof(map_state));
+            map_data.enteringElevation = 0;
+            map_data.enteringRotation = 0;
+            map_data.localVariablesCount = 0;
+            map_data.version = 19;
+            map_data.name[0] = '\0';
+            map_data.enteringTile = 20100; })
+        != 0) return -1;
 
     // NOTE: Uninline.
     map_free_global_vars();
@@ -851,6 +864,7 @@ void map_new_map()
     square_reset();
     map_place_dude_and_mouse();
     tile_refresh_display();
+    return 0;
 }
 
 // 0x474614
@@ -877,7 +891,7 @@ int map_load(char* file_name)
 
         if (stream != NULL) {
             rc = map_load_in_game(file_name);
-            PlayCityMapMusic();
+            if (rc == 0) PlayCityMapMusic();
         }
     }
 
@@ -912,7 +926,7 @@ int map_load_idx(int map)
 
     rc = map_load(name);
 
-    PlayCityMapMusic();
+    if (rc == 0) PlayCityMapMusic();
 
     return rc;
 }
@@ -923,7 +937,12 @@ int map_load_file(DB_FILE* stream)
     int rc = 0;
     const char* error;
 
-    map_save_in_game(true);
+    // Held until the map is in place, on every path out of this function.
+    ModalPause loadPause;
+    world_sim_invalidate();
+
+    const int saved = map_save_in_game(true);
+    if (saved != 0) return saved;
     gsound_background_play("wind2", 12, 13, 16);
     map_disable_bk_processes();
     partyMemberPrepLoad();
@@ -934,19 +953,25 @@ int map_load_file(DB_FILE* stream)
     anim_stop();
     scr_disable();
 
-    map_script_id = -1;
+    MapHeader incomingMapData;
+    bool teardownFailed = false;
 
     do {
         error = "Invalid file handle";
         if (stream == NULL) break;
 
         error = "Error reading header";
-        if (map_read_MapData(&map_data, stream) != 0) break;
+        if (map_read_MapData(&incomingMapData, stream) != 0) break;
 
         error = "Invalid map version";
-        if (map_data.version != 19) break;
+        if (incomingMapData.version != 19) break;
 
-        obj_remove_all();
+        if (object_transition_after_clear([] { return obj_remove_all(); }, [&] {
+                map_data = incomingMapData;
+                map_script_id = -1; }) != 0) {
+            teardownFailed = true;
+            break;
+        }
 
         if (map_data.globalVariablesCount < 0) {
             map_data.globalVariablesCount = 0;
@@ -1020,7 +1045,8 @@ int map_load_file(DB_FILE* stream)
 
             Object* object;
             int fid = art_id(OBJ_TYPE_MISC, 12, 0, 0, 0);
-            obj_new(&object, fid, -1);
+            error = "Error creating map script object";
+            if (obj_new(&object, fid, -1) == -1) break;
             object->flags |= (OBJECT_LIGHT_THRU | OBJECT_NO_SAVE | OBJECT_HIDDEN);
             obj_move_to_tile(object, 1, 0, NULL);
             object->sid = map_script_id;
@@ -1041,11 +1067,33 @@ int map_load_file(DB_FILE* stream)
         error = NULL;
     } while (0);
 
+    if (teardownFailed) {
+        // Do not enter ordinary error recovery: it clears the map again and
+        // then runs enter scripts. The old header and script ID remain intact.
+        partyMemberRecoverLoad();
+        map_enable_bk_processes();
+        scr_enable();
+        tile_enable_refresh();
+        db_register_callback(NULL, 0);
+        gmouse_enable_scrolling();
+        gmouse_set_cursor(MOUSE_CURSOR_NONE);
+        return OBJECT_TRANSITION_CANCELLED;
+    }
+
     if (error != NULL) {
         char message[100]; // TODO: Size is probably wrong.
         snprintf(message, sizeof(message), "%s while loading map, version = %d", error, map_data.version);
         debug_printf(message);
-        map_new_map();
+        if (map_new_map() != 0) {
+            partyMemberRecoverLoad();
+            map_enable_bk_processes();
+            scr_enable();
+            tile_enable_refresh();
+            db_register_callback(NULL, 0);
+            gmouse_enable_scrolling();
+            gmouse_set_cursor(MOUSE_CURSOR_NONE);
+            return OBJECT_TRANSITION_CANCELLED;
+        }
         rc = -1;
     } else {
         obj_preload_art_cache(map_data.flags);
@@ -1091,6 +1139,7 @@ int map_load_in_game(char* fileName)
     strmfe(mapName, fileName, "SAV");
 
     int rc = map_load(mapName);
+    if (rc != 0) return rc;
 
     if (game_time() >= map_data.lastVisitTime) {
         if (((game_time() - map_data.lastVisitTime) / GAME_TIME_TICKS_PER_HOUR) >= 24) {
@@ -1242,6 +1291,11 @@ int map_leave_map(MapTransition* transition)
     return 0;
 }
 
+bool map_transition_pending()
+{
+    return map_state.map != 0;
+}
+
 // 0x4751A4
 int map_check_state()
 {
@@ -1283,7 +1337,10 @@ int map_check_state()
     } else {
         if (!isInCombat()) {
             // NOTE: Uninline.
-            map_load_idx(map_state.map);
+            if (map_load_idx(map_state.map) != 0) {
+                memset(&map_state, 0, sizeof(map_state));
+                return -1;
+            }
 
             if (map_state.tile != -1 && map_state.tile != 0
                 && map_state.elevation >= 0 && map_state.elevation < ELEVATION_COUNT) {
@@ -1371,6 +1428,9 @@ int map_save_file(DB_FILE* stream)
         return -1;
     }
 
+    // Covers the error dialogs below, which wait for input with scripts off.
+    ModalPause savePause;
+
     scr_disable();
 
     for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
@@ -1454,6 +1514,15 @@ int map_save_in_game(bool a1)
         return 0;
     }
 
+    ModalPause savePause;
+
+    // The map is being left. This is before anim_stop(), which can remove
+    // objects and run their callbacks, and before the other teardown. An ordinary
+    // save (a1 false) leaves the map as it is.
+    if (a1) {
+        world_sim_invalidate();
+    }
+
     anim_stop();
 
     if (a1) {
@@ -1471,6 +1540,8 @@ int map_save_in_game(bool a1)
         obj_reset_roof();
     }
 
+    const MapHeader beforeSaveMetadata = map_data;
+    const uint64_t beforeSaveEpoch = world_sim_epoch();
     map_data.flags |= MAP_SAVED;
     map_data.lastVisitTime = game_time();
 
@@ -1498,11 +1569,15 @@ int map_save_in_game(bool a1)
     }
 
     if (a1) {
-        map_data.name[0] = '\0';
-        obj_remove_all();
-        proto_remove_all();
-        square_reset();
-        gtime_q_add();
+        return object_transition_after_clear([] { return obj_remove_all(); }, [] {
+            map_data.name[0] = '\0';
+            proto_remove_all();
+            square_reset();
+            gtime_q_add(); }, [&] {
+            if (world_sim_epoch() == beforeSaveEpoch) map_data = beforeSaveMetadata;
+            // This save staged party scripts before teardown preparation. Its
+            // caller returns immediately on cancellation, so recover them here.
+            partyMemberRecoverLoad(); });
     }
 
     return 0;

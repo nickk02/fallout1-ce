@@ -15,6 +15,9 @@
 #include "plib/db/db.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
+#include "sim/procedure_table.h"
+#include "sim/program_dispatch.h"
+#include "sim/script_binding.h"
 
 namespace fallout {
 
@@ -169,6 +172,15 @@ static unsigned int defaultTimerFunc()
     return get_time();
 }
 
+// The interpreter's absolute time: the timer in milliseconds. Every wait, timed
+// procedure and event deadline is in these units. The conversion is done in 64
+// bits: 1000 * the timer wrapped in 32 bits after about 71.6 minutes, which
+// made deadlines meaningless from then on.
+static unsigned int interpreterNow()
+{
+    return interpreter_units(timerFunc(), timerTick);
+}
+
 // 0x45B408
 void interpretSetTimeFunc(InterpretTimerFunc* timerFunc, int timerTick)
 {
@@ -197,7 +209,7 @@ static int outputStr(char* string)
 // 0x45B428
 static int checkWait(Program* program)
 {
-    return 1000 * timerFunc() / timerTick <= program->waitEnd;
+    return interpreterNow() <= program->waitEnd;
 }
 
 // 0x45B45C
@@ -388,6 +400,7 @@ static void purgeProgram(Program* program)
 // 0x45B924
 void interpretFreeProgram(Program* program)
 {
+    program_lifetimes().retire(program);
     // NOTE: Uninline.
     detachProgram(program);
 
@@ -462,6 +475,10 @@ Program* allocateProgram(const char* path)
     program->stackValues = new ProgramStack();
     program->returnStackValues = new ProgramStack();
 
+    if (program_lifetimes().admit(program) == 0) {
+        interpretFreeProgram(program);
+        return NULL;
+    }
     return program;
 }
 
@@ -650,13 +667,9 @@ static void op_call_at(Program* program)
         data[arg] = programStackPopInteger(program);
     }
 
-    unsigned char* procedure_ptr = program->procedures + 4 + sizeof(Procedure) * data[0];
-
-    int delay = 1000 * data[1] + 1000 * timerFunc() / timerTick;
-    int flags = fetchLong(procedure_ptr, 4);
-
-    storeLong(delay, procedure_ptr, 8);
-    storeLong(flags | PROCEDURE_FLAG_TIMED, procedure_ptr, 4);
+    // Inside a suspension the delay counts from where the suspension began (see
+    // procedure_table_schedule_timed).
+    procedure_table_schedule_timed(program->procedures, sizeof(Procedure), PROCEDURE_FLAG_TIMED, data[0], data[1], interpreterNow(), suspendEvents != 0, interpreter_units(suspendTime, timerTick));
 }
 
 // 0x45C0DC
@@ -680,7 +693,7 @@ static void op_wait(Program* program)
 {
     int data = programStackPopInteger(program);
 
-    program->waitStart = 1000 * timerFunc() / timerTick;
+    program->waitStart = interpreterNow();
     program->waitEnd = program->waitStart + data;
     program->checkWaitFunc = checkWait;
     program->flags |= PROGRAM_IS_WAITING;
@@ -2555,7 +2568,7 @@ void interpret(Program* program, int a2)
     }
 
     if (program->field_78 == -1) {
-        program->field_78 = 1000 * timerFunc() / timerTick;
+        program->field_78 = interpreterNow();
     }
 
     currentProgram = program;
@@ -2628,6 +2641,11 @@ void interpret(Program* program, int a2)
 
     program->flags &= ~PROGRAM_FLAG_0x40;
     currentProgram = oldCurrentProgram;
+}
+
+bool interpretIsRunning()
+{
+    return currentProgram != NULL;
 }
 
 // Prepares program stacks for executing proc at [address].
@@ -2830,7 +2848,7 @@ static void doEvents()
     }
 
     programListNode = head;
-    time = 1000 * timerFunc() / timerTick;
+    time = interpreterNow();
 
     while (programListNode != NULL) {
         procedureCount = fetchLong(programListNode->program->procedures, 0);
@@ -2947,19 +2965,17 @@ void interpretSetCPUBurstSize(int value)
 // 0x461F28
 void updatePrograms()
 {
-    ProgramListNode* curr = head;
-    while (curr != NULL) {
-        ProgramListNode* next = curr->next;
-        if (curr->program != NULL) {
-            interpret(curr->program, cpuBurstSize);
-        }
-        if (curr->program->exited) {
-            removeProgList(curr);
-        }
-        curr = next;
-    }
+    program_dispatch_all(head, [](Program* program) { interpret(program, cpuBurstSize); }, [](Program* program) { return program->exited; }, removeProgList);
     doEvents();
     updateIntLib();
+}
+
+// Runs one program and leaves every other program, the timed and conditional
+// procedures and the named events alone. For a world pause that still has to
+// execute a script synchronously.
+void updateProgram(Program* program)
+{
+    program_dispatch_one(head, program, [](Program* p) { interpret(p, cpuBurstSize); }, [](Program* p) { return p->exited; }, removeProgList);
 }
 
 // 0x461F74
@@ -3063,32 +3079,46 @@ void interpretSuspendEvents()
     }
 }
 
+// Moves the end of every program's wait() forward, for a pause that stopped the
+// clock the wait counts against. Waits on other conditions are left alone.
+void interpretShiftWaits(unsigned int elapsed)
+{
+    unsigned int shift = interpreter_units(elapsed, timerTick);
+    for (ProgramListNode* node = head; node != NULL; node = node->next) {
+        Program* program = node->program;
+        if ((program->flags & PROGRAM_IS_WAITING) != 0 && program->checkWaitFunc == checkWait) {
+            program->waitStart += shift;
+            program->waitEnd += shift;
+        }
+    }
+}
+
+// Restarts the clock of a suspension in progress, for a pause whose start moved
+// (a load inside it). Programs made after the load must not be shifted by the
+// time before it.
+void interpretRestartSuspension()
+{
+    if (suspendEvents != 0) {
+        suspendTime = timerFunc();
+    }
+}
+
 // 0x4620FC
 void interpretResumeEvents()
 {
     int counter;
     ProgramListNode* programListNode;
     unsigned int time;
-    int procedureCount;
-    int procedureIndex;
-    unsigned char* procedurePtr;
 
     counter = suspendEvents;
     if (suspendEvents != 0) {
         suspendEvents--;
         if (counter == 1) {
             programListNode = head;
-            time = 1000 * (timerFunc() - suspendTime) / timerTick;
+            time = interpreter_units(timerFunc() - suspendTime, timerTick);
             while (programListNode != NULL) {
-                procedureCount = fetchLong(programListNode->program->procedures, 0);
-                procedurePtr = programListNode->program->procedures + 4;
-                for (procedureIndex = 0; procedureIndex < procedureCount; procedureIndex++) {
-                    if ((fetchLong(procedurePtr, 4) & PROCEDURE_FLAG_TIMED) != 0) {
-                        storeLong(fetchLong(procedurePtr, 8) + time, procedurePtr, 8);
-                    }
-                }
+                procedure_table_shift_timed(programListNode->program->procedures, sizeof(Procedure), PROCEDURE_FLAG_TIMED, time);
                 programListNode = programListNode->next;
-                procedurePtr += sizeof(Procedure);
             }
         }
     }

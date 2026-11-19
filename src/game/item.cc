@@ -170,6 +170,7 @@ int item_save(DB_FILE* stream)
 // 0x469C88
 int item_add_mult(Object* owner, Object* itemToAdd, int quantity)
 {
+    if (obj_is_destroying(owner) || obj_is_destroying(itemToAdd)) return -1;
     if (quantity < 1) {
         return -1;
     }
@@ -231,6 +232,7 @@ int item_add_mult(Object* owner, Object* itemToAdd, int quantity)
 // 0x469DE4
 int item_add_force(Object* owner, Object* itemToAdd, int quantity)
 {
+    if (obj_is_destroying(owner) || obj_is_destroying(itemToAdd)) return -1;
     if (quantity < 1) {
         return -1;
     }

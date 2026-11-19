@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/automap.h"
 #include "game/bmpdlog.h"
 #include "game/combat.h"
@@ -34,6 +36,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -252,6 +255,9 @@ static const short holodisks[HOLODISK_COUNT] = {
 
 // 0x507224
 static bool bk_enable = false;
+
+// Holds the world pause while the Pip-Boy is open.
+static std::optional<ModalPause> pipboy_pause;
 
 // NOTE: Quest location indexes match town, I'm not sure if that was intentional
 // or just a coincedence.
@@ -533,6 +539,8 @@ int pipboy(int intent)
 {
     intent = StartPipboy(intent);
     if (intent == -1) {
+        // The error paths of StartPipboy do not enable the processes again.
+        pipboy_pause.reset();
         return -1;
     }
 
@@ -604,6 +612,7 @@ int pipboy(int intent)
 // 0x486C5C
 static int StartPipboy(int intent)
 {
+    pipboy_pause.emplace();
     bk_enable = map_disable_bk_processes();
 
     cycle_disable();
@@ -831,6 +840,7 @@ static void EndPipboy()
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    pipboy_pause.reset();
 
     cycle_enable();
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);

@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/bmpdlog.h"
@@ -47,6 +49,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -996,7 +999,7 @@ int world_map(WorldMapContext ctx)
     text = getmsg(&map_msg_file, &mesg, 1000);
     body[0] = text;
 
-    if (map_save_in_game(true) == -1) {
+    if (map_save_in_game(true) != 0) {
         debug_printf("\nWORLD MAP: ** Error saving map! **\n");
         gmouse_disable(0);
         gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -1008,6 +1011,10 @@ int world_map(WorldMapContext ctx)
     }
 
     iso_was_disabled = 0;
+
+    // Released by the destructor on the error returns, which leave the
+    // processes disabled as before.
+    std::optional<ModalPause> world_pause;
 
     soundUpdate();
 
@@ -1136,6 +1143,7 @@ int world_map(WorldMapContext ctx)
                 colorTable[0]);
             win_draw(display_win);
 
+            world_pause.emplace();
             bk_enable = map_disable_bk_processes();
             cycle_disable();
             iso_was_disabled = 1;
@@ -2296,6 +2304,7 @@ int world_map(WorldMapContext ctx)
             if (bk_enable) {
                 map_enable_bk_processes();
             }
+            world_pause.reset();
             cycle_enable();
         }
 
@@ -2564,7 +2573,7 @@ static int LoadTownMap(const char* filename, int map_idx)
     // subsequent `map_load` wants filename to be mutable.
     strcpy(filename_copy, filename);
 
-    if (map_load(filename_copy) == -1) {
+    if (map_load(filename_copy) != 0) {
         debug_printf("\nWORLD MAP: ** Error loading town map! **\n");
         return -1;
     }
@@ -3115,7 +3124,7 @@ WorldMapContext town_map(WorldMapContext ctx)
     text = getmsg(&map_msg_file, &mesg, 1000);
     body[0] = text;
 
-    if (map_save_in_game(true) == -1) {
+    if (map_save_in_game(true) != 0) {
         debug_printf("\nWORLD MAP: ** Error saving map! **\n");
         gmouse_disable(0);
         gmouse_set_cursor(1);
@@ -3384,6 +3393,7 @@ WorldMapContext town_map(WorldMapContext ctx)
     win_draw(world_win);
     renderPresent();
 
+    ModalPause town_pause;
     bk_enable = map_disable_bk_processes();
     cycle_disable();
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -3491,6 +3501,7 @@ WorldMapContext town_map(WorldMapContext ctx)
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    town_pause.release();
 
     cycle_enable();
 

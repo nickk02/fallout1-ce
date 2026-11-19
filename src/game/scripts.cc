@@ -7,6 +7,7 @@
 
 #include "game/actions.h"
 #include "game/automap.h"
+#include "game/calendar_queue.h"
 #include "game/combat.h"
 #include "game/critter.h"
 #include "game/elevator.h"
@@ -15,10 +16,12 @@
 #include "game/gdialog.h"
 #include "game/gmouse.h"
 #include "game/gmovie.h"
+#include "game/map.h"
 #include "game/object.h"
 #include "game/protinst.h"
 #include "game/proto.h"
 #include "game/queue.h"
+#include "game/sim_service.h"
 #include "game/tile.h"
 #include "game/worldmap.h"
 #include "int/dialog.h"
@@ -30,6 +33,10 @@
 #include "plib/gnw/input.h"
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
+#include "sim/calendar_pull.h"
+#include "sim/sim_log.h"
+#include "sim/timed_events.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -566,15 +573,22 @@ static void doBkProcesses()
 
         // NOTE: There is a loop at 0x4A3C64, consisting of one iteration, going
         // downwards from 1.
-        for (int index = 0; index < 1; index++) {
-            updatePrograms();
+        //
+        // While an owned pause is held the background pass leaves the programs
+        // alone: their timers stand still (see sim_service) and nothing in the
+        // world moves. A script that must run inside the pause is run directly
+        // by its caller, through updateProgram().
+        if (!world_sim_world_paused()) {
+            for (int index = 0; index < 1; index++) {
+                updatePrograms();
+            }
         }
     }
 
     updateWindows();
 
     if (script_engine_running && script_engine_run_critters) {
-        if (!dialog_active()) {
+        if (!dialog_active() && !world_sim_world_paused()) {
             script_chk_critters();
             script_chk_timed_events();
         }
@@ -625,16 +639,74 @@ static void script_chk_critters()
     }
 }
 
+// 0x51C7E0, 0x51C7E4
+static TimedEventClock script_timed_events;
+
+// Starts the timed events over from `now`, the current time. Used when an owned
+// pause ends, so the time spent paused does not come due all at once.
+void scr_rebase_timed_events(unsigned int now)
+{
+    script_timed_events.rebase(now);
+}
+
+// `true` when the simulation clock, and not the wall clock, advances the game
+// calendar: owned pauses and real-time combat.
+bool scr_calendar_owned()
+{
+    return world_sim_owns_pauses() && combat_is_realtime();
+}
+
+static CalendarPull calendar_pull;
+
+// Read-only view of the owned calendar for the opt-in diagnostics.
+void scr_calendar_stats(unsigned int* pending, unsigned long long* dropped, const char** status)
+{
+    *pending = calendar_pull.pendingTicks();
+    *dropped = calendar_pull.droppedTicks();
+    *status = calendar_pull_status_name(calendar_pull.lastStatus());
+}
+
+// Holds back a repeating calendar status line.
+static StatusLogGate calendar_status_gate;
+
 // TODO: Check.
 //
 // 0x49207C
 static void script_chk_timed_events()
 {
-    // 0x51C7E0
-    static int last_time = 0;
+    if (scr_calendar_owned()) {
+        int now = get_bk_time();
+        if (game_state() != GAME_STATE_4 && script_timed_events.lightUpdateDue(now)) {
+            scr_exec_map_update_scripts();
+        }
 
-    // 0x51C7E4
-    static int last_light_time = 0;
+        GameCalendarQueue queue;
+        CalendarPullEnv env;
+        env.epoch = world_sim_epoch;
+        env.simTicks = world_sim_tick_count;
+        env.quit = []() { return game_user_wants_to_quit != 0; };
+        env.deferred = []() {
+            return scriptState.requests != 0
+                || map_transition_pending()
+                || !script_engine_running
+                || game_state() == GAME_STATE_4;
+        };
+
+        CalendarPullResult result = calendar_pull.pull(queue, env);
+        uint32_t suppressed = 0;
+        if (calendar_pull_status_should_log(calendar_status_gate, result.status, world_sim_tick_count(), &suppressed)) {
+            char line[192];
+            snprintf(line, sizeof(line), "simlog calendar status=%s game_time=%d pending=%u dropped=%llu suppressed=%u",
+                calendar_pull_status_name(result.status),
+                game_time(),
+                calendar_pull.pendingTicks(),
+                static_cast<unsigned long long>(calendar_pull.droppedTicks()),
+                suppressed);
+            sim_service_note(line);
+        }
+
+        return;
+    }
 
     int now;
     bool should_process_queue;
@@ -647,18 +719,17 @@ static void script_chk_timed_events()
     }
 
     if (game_state() != GAME_STATE_4) {
-        if (elapsed_tocks(now, last_light_time) >= 30000) {
-            last_light_time = now;
+        if (script_timed_events.lightUpdateDue(now)) {
             scr_exec_map_update_scripts();
         }
     } else {
         should_process_queue = false;
     }
 
-    if (elapsed_tocks(now, last_time) >= 100) {
-        last_time = now;
+    if (script_timed_events.secondTickDue(now)) {
         if (!isInCombat()) {
             fallout_game_time += 1;
+            world_sim_note_legacy_calendar_tick();
         }
         should_process_queue = true;
     }
@@ -1122,18 +1193,28 @@ int exec_script_proc(int sid, int action)
     }
 
     script->scr_flags |= SCRIPT_FLAG_0x04;
+    const auto binding = begin_script_call(*script, world_sim_epoch());
+    if (!binding.valid()) return -1;
 
     if (programLoaded) {
         scr_build_lookup_table(script);
         runProgram(program);
         interpretSetCPUBurstSize(5000);
-        updatePrograms();
+        if (world_sim_world_paused()) {
+            // Only the script that was just loaded, not the rest of the world.
+            updateProgram(program);
+        } else {
+            updatePrograms();
+        }
         interpretSetCPUBurstSize(10);
     } else {
         executeProcedure(program, proc);
     }
 
-    script->source = NULL;
+    finish_script_call(binding, world_sim_epoch(), [](int id) -> Script* {
+        Script* current;
+        return scr_ptr(id, &current) == 0 ? current : nullptr;
+    });
 
     return 0;
 }
@@ -1771,6 +1852,8 @@ int scr_save(DB_FILE* stream)
 // 0x493BB8
 static int scr_read_ScriptSubNode(Script* scr, DB_FILE* stream)
 {
+    scr->runtimeIdentity = { new_script_incarnation(), 0 };
+    if (scr->runtimeIdentity.incarnation == 0) return -1;
     int prg;
 
     if (db_freadInt(stream, &(scr->scr_id)) == -1) return -1;
@@ -1967,6 +2050,8 @@ static int scr_new_id(int scriptType)
 // 0x4940D0
 int scr_new(int* sidPtr, int scriptType)
 {
+    const uint64_t incarnation = new_script_incarnation();
+    if (incarnation == 0) return -1;
     ScriptList* scriptList = &(scriptlists[scriptType]);
     ScriptListExtent* scriptListExtent = scriptList->tail;
     if (scriptList->head != NULL) {
@@ -2006,6 +2091,7 @@ int scr_new(int* sidPtr, int scriptType)
 
     Script* scr = &(scriptListExtent->scripts[scriptListExtent->length]);
     scr->scr_id = sid;
+    scr->runtimeIdentity = { incarnation, 0 };
     scr->sp.built_tile = -1;
     scr->sp.radius = -1;
     scr->scr_flags = 0;

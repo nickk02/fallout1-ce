@@ -14,7 +14,7 @@ extern int obj_pid_old;
 void switch_dude();
 int action_knockback(Object* obj, int* anim, int maxDistance, int rotation, int delay);
 int action_blood(Object* obj, int anim, int delay);
-void show_damage_to_object(Object* a1, int damage, int flags, Object* weapon, bool isFallingBack, int knockbackDistance, int knockbackRotation, int a8, Object* a9, int a10);
+void show_damage_to_object(Object* a1, int damage, int flags, Object* weapon, bool isFallingBack, int knockbackDistance, int knockbackRotation, int a8, Object* a9, int a10, int visualDamageType = -1);
 int show_damage_target(Attack* attack);
 int show_damage_extras(Attack* attack);
 void show_damage(Attack* attack, int a2, int a3);

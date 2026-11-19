@@ -11,12 +11,11 @@
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/combatai.h"
-#include "game/damage_popup.h"
-#include "game/free_move.h"
-#include "game/soft_target.h"
 #include "game/critter.h"
+#include "game/damage_popup.h"
 #include "game/display.h"
 #include "game/elevator.h"
+#include "game/free_move.h"
 #include "game/game.h"
 #include "game/gconfig.h"
 #include "game/gmouse.h"
@@ -32,7 +31,9 @@
 #include "game/queue.h"
 #include "game/roll.h"
 #include "game/scripts.h"
+#include "game/sim_service.h"
 #include "game/skill.h"
+#include "game/soft_target.h"
 #include "game/stat.h"
 #include "game/stick_move.h"
 #include "game/tile.h"
@@ -42,12 +43,19 @@
 #include "plib/db/db.h"
 #include "plib/gnw/button.h"
 #include "plib/gnw/debug.h"
+#include "plib/gnw/game_commands.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/input.h"
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/attack_instance.h"
+#include "sim/attack_participants.h"
+#include "sim/buffered_attack.h"
+#include "sim/tick_accumulator.h"
+#include "sim/vats_shot.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -67,6 +75,7 @@ static int combat_input();
 static int combat_turn(Object* a1, bool a2);
 static bool combat_should_end();
 static void combat_realtime_forget();
+static void combat_finish_attack_if_ready();
 static bool check_ranged_miss(Attack* attack);
 static int shoot_along_path(Attack* attack, int a2, int a3, int anim);
 static int compute_spray(Attack* attack, int accuracy, int* roundsHitMainTargetPtr, int* roundsSpentPtr, int anim);
@@ -78,7 +87,7 @@ static int determine_to_hit_func(Object* attacker, Object* defender, int hitLoca
 static void compute_damage(Attack* attack, int ammoQuantity, int bonusDamageMultiplier);
 static void check_for_death(Object* a1, int a2, int* a3);
 static void set_new_results(Object* a1, int a2);
-static void damage_object(Object* obj, int damage, bool animated, bool a4);
+static bool damage_object(Object* obj, int damage, bool animated, bool a4);
 static void combat_display_hit(char* dest, size_t size, Object* critter_obj, int damage);
 static void combat_display_flags(char* a1, int flags, Object* a3);
 static void combat_standup(Object* a1);
@@ -96,6 +105,7 @@ static char _a_1[] = ".";
 
 // 0x4FEC80
 static int combat_turn_running = 0;
+static CombatAnimationLeases combat_animation_leases;
 
 // 0x4FEC84
 unsigned int combat_state = COMBAT_STATE_0x02;
@@ -117,7 +127,6 @@ void combat_set_realtime(bool enabled)
 STRUCT_664980* gcsd = NULL;
 
 // 0x4FEC8C
-bool combat_call_display = false;
 
 // Accuracy modifiers for hit locations.
 //
@@ -1482,7 +1491,8 @@ static CriticalHitDescription pc_crit_succ_eff[HIT_LOCATION_COUNT][CRTICIAL_EFFE
 static int combat_end_due_to_load = 0;
 
 // 0x517F9C
-static bool combat_cleanup_enabled = false;
+// One active instance, still serialized by the global animation barrier.
+static SerializedAttack combat_attacks;
 
 // Provides effects caused by failing weapons.
 //
@@ -1522,6 +1532,7 @@ static int hit_loc_right[4] = {
 };
 
 // 0x56BBB0
+// Turn/UI setup scratch only. Computed attacks live in combat_attacks.
 static Attack main_ctd;
 
 // combat.msg
@@ -1530,7 +1541,7 @@ static Attack main_ctd;
 MessageList combat_message_file;
 
 // 0x56BC70
-static Object* call_target;
+static ObjectRef call_target;
 
 // 0x56BC74
 static int call_win;
@@ -1567,25 +1578,31 @@ int combat_exps;
 // 0x56BC9C
 int combat_free_move;
 
+// A load/reset abandons runtime work, including any completion still on the
+// stack. The serialized animation count never reconstructs animation sequences.
+static void combat_animation_reset()
+{
+    combat_animation_leases.reset();
+    combat_turn_running = 0;
+    combat_attacks.reset();
+}
+
 // 0x41F810
 int combat_init()
 {
     char path[COMPAT_MAX_PATH];
 
-    combat_turn_running = 0;
+    combat_animation_reset();
     combat_list = NULL;
     list_com = 0;
     list_noncom = 0;
     list_total = 0;
     gcsd = NULL;
-    combat_call_display = 0;
     combat_state = COMBAT_STATE_0x02;
     obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
     combat_free_move = 0;
     combat_ending_guy = NULL;
     combat_end_due_to_load = 0;
-
-    combat_cleanup_enabled = 0;
 
     if (!message_init(&combat_message_file)) {
         return -1;
@@ -1603,13 +1620,13 @@ int combat_init()
 // 0x41F8E8
 void combat_reset()
 {
-    combat_turn_running = 0;
+    // Cancel before any teardown can run an animation callback.
+    combat_animation_reset();
     combat_list = NULL;
     list_com = 0;
     list_noncom = 0;
     list_total = 0;
     gcsd = NULL;
-    combat_call_display = 0;
     combat_state = COMBAT_STATE_0x02;
     obj_dude->data.critter.combat.ap = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
     combat_free_move = 0;
@@ -1621,6 +1638,7 @@ void combat_reset()
 // 0x41F950
 void combat_exit()
 {
+    combat_animation_reset();
     message_exit(&combat_message_file);
 }
 
@@ -1641,6 +1659,7 @@ int find_cid(int start, int cid, Object** critterList, int critterListLength)
 // 0x41F988
 int combat_load(DB_FILE* stream)
 {
+    combat_animation_reset();
     Object* obj;
     int cid;
     int i;
@@ -1661,7 +1680,10 @@ int combat_load(DB_FILE* stream)
         return 0;
     }
 
-    if (db_freadInt32(stream, &combat_turn_running) == -1) return -1;
+    int legacyAnimationCount;
+    if (db_freadInt32(stream, &legacyAnimationCount) == -1) return -1;
+    combat_animation_leases.normalizeLoadedCount(legacyAnimationCount);
+    combat_turn_running = combat_animation_leases.count();
     if (db_freadInt32(stream, &combat_free_move) == -1) return -1;
     if (db_freadInt32(stream, &combat_exps) == -1) return -1;
     if (db_freadInt32(stream, &list_com) == -1) return -1;
@@ -1903,6 +1925,7 @@ static void combat_over()
 // 0x4200A8
 void combat_over_from_load()
 {
+    combat_animation_reset();
     combat_over();
     combat_state = 0;
     combat_end_due_to_load = 1;
@@ -2121,7 +2144,9 @@ static void combat_sequence()
 
     list_com = count;
 
-    inc_game_time_in_seconds(5);
+    if (!scr_calendar_owned()) {
+        inc_game_time_in_seconds(5);
+    }
 }
 
 // 0x420554
@@ -2182,6 +2207,11 @@ void combat_end()
 // Action points are the pause's resource. Attacks and movement do not use them.
 #define REALTIME_AP_INTERVAL 400
 
+// The same interval in simulation ticks: 400 ms at 60 ticks a second. With owned
+// pauses (WORLD_SIM=2) the points come back by this count and not by the wall
+// clock. See combat_ap_uses_sim_ticks().
+#define REALTIME_AP_TICKS 24
+
 // Least action points an enemy gets for one turn, and the pause before an
 // enemy first acts, so the player can react.
 #define REALTIME_ENEMY_MIN_AP 3
@@ -2192,13 +2222,29 @@ void combat_end()
 
 static bool combat_realtime_active = false;
 static bool combat_realtime_pumping = false;
-static Object* combat_realtime_queued_attack = NULL;
-static unsigned int combat_realtime_queued_at = 0;
-
-// How long a buffered attack waits for action points or a free attack state.
-#define REALTIME_ATTACK_BUFFER 2500
+// Ordinary attacks waiting for the shared attack state. VATS keeps its own queue.
+static BufferedAttack combat_realtime_queued_attack;
 static unsigned int combat_realtime_ap_tick = 0;
+static TickAccumulator combat_realtime_ap_ticks(REALTIME_AP_TICKS);
+
+// Action points paid out by the tick path, for the opt-in diagnostics.
+static unsigned long long combat_ap_grants_total = 0;
+
+unsigned long long combat_ap_grants()
+{
+    return combat_ap_grants_total;
+}
+
+// `true` when the simulation clock gives the action points back. Other modes and
+// turn-based combat keep the wall clock window above.
+static bool combat_ap_uses_sim_ticks()
+{
+    return world_sim_owns_pauses() && combat_realtime;
+}
 static unsigned int combat_realtime_enemy_done = 0;
+
+// When the fight last looked for new creatures to act.
+static unsigned int combat_realtime_last_sequence = 0;
 
 // When the player last had a reason to fight: an enemy that sees the player, an
 // enemy acting, or the player attacking. A fight with none of those for a while
@@ -2207,7 +2253,7 @@ static unsigned int combat_realtime_last_threat = 0;
 #define REALTIME_IDLE_END 8000
 static std::unordered_map<Object*, unsigned int> combat_realtime_next_turn;
 
-static void combat_attack_this_now(Object* a1);
+static void combat_attack_this_now(Object* a1, std::optional<int> capturedHitMode = std::nullopt);
 static int combat_realtime_pump();
 static void combat_realtime_loop();
 static void combat_realtime_pause();
@@ -2216,11 +2262,7 @@ static void combat_pause_fire_next();
 
 // The combat pause. Time stops, the player picks targets and body parts, and
 // the shots then go out one after another while the enemies wait.
-typedef struct QueuedShot {
-    Object* target;
-    int hitMode;
-    int hitLocation;
-} QueuedShot;
+using QueuedShot = VatsShot;
 
 static bool combat_paused = false;
 
@@ -2237,24 +2279,52 @@ static void combat_shift_timers(unsigned int delta)
     for (auto& entry : combat_realtime_next_turn) {
         entry.second += delta;
     }
-    combat_realtime_ap_tick += delta;
-    combat_realtime_queued_at += delta;
+    // The tick count does not run while paused, so the tick path has nothing to
+    // move.
+    if (!combat_ap_uses_sim_ticks()) {
+        combat_realtime_ap_tick += delta;
+    }
+    combat_realtime_queued_attack.delayExpiry(delta);
     combat_realtime_last_threat += delta;
     damage_popup_delay_all(delta);
 }
 
 // Stops the game for a screen that opens in the middle of a fight, such as the
-// inventory. Returns the time to hand back to `combat_freeze_end`.
-unsigned int combat_freeze_begin()
+// inventory. Hand the result back to `combat_freeze_end`.
+CombatFreeze combat_freeze_begin()
 {
-    anim_set_paused(true);
-    return get_time();
+    CombatFreeze freeze;
+    freeze.token = world_sim_pause();
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(true);
+    }
+    freeze.start = get_time();
+    return freeze;
 }
 
-void combat_freeze_end(unsigned int start)
+void combat_freeze_end(CombatFreeze& freeze)
 {
-    anim_set_paused(false);
-    combat_shift_timers(get_time() - start);
+    freeze.token.release();
+
+    // With owned pauses the last release thaws the animations and shifts the
+    // timers once, from the start of the outermost pause.
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(false);
+        combat_shift_timers(get_time() - freeze.start);
+    }
+}
+
+void combat_world_resumed(unsigned int elapsed)
+{
+    combat_shift_timers(elapsed);
+
+    // Two timers the turn-based pause code never moved. Left alone, the time
+    // spent paused would use up the player's window after an enemy action and
+    // trigger the next sequence (which advances the campaign clock) at once.
+    if (combat_realtime_enemy_done != 0) {
+        combat_realtime_enemy_done += elapsed;
+    }
+    combat_realtime_last_sequence += elapsed;
 }
 
 // Stops time. Every animation freezes, no creature acts, and no action points
@@ -2269,7 +2339,10 @@ static void combat_realtime_pause()
 
     combat_paused = true;
     gsound_play_sfx_file("icombat1");
-    anim_set_paused(true);
+    PauseToken pauseToken = world_sim_pause();
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(true);
+    }
     soft_target_set_wide(true);
     combat_pause_building.clear();
 
@@ -2282,7 +2355,7 @@ static void combat_realtime_pause()
     while (game_user_wants_to_quit == 0) {
         sharedFpsLimiter.mark();
 
-        int input = get_input();
+        int input = get_input_in(CommandContext::World);
         if (input == KEY_LOWERCASE_V || input == KEY_UPPERCASE_V || input == KEY_ESCAPE || input == KEY_RETURN) {
             break;
         }
@@ -2295,21 +2368,52 @@ static void combat_realtime_pause()
     }
 
     soft_target_set_wide(false);
-    anim_set_paused(false);
+    pauseToken.release();
+    if (!world_sim_owns_pauses()) {
+        anim_set_paused(false);
+    }
     combat_paused = false;
     gsound_play_sfx_file("icombat2");
 
-    combat_shift_timers(get_time() - start);
+    if (!world_sim_owns_pauses()) {
+        combat_shift_timers(get_time() - start);
+    }
 
     combat_pause_running = combat_pause_building;
     combat_pause_building.clear();
+}
+
+static VatsShotValidation combat_pause_validate(const QueuedShot& shot)
+{
+    return vats_shot_validate(object_registry(), shot, world_sim_epoch(),
+        [](void* attackerPtr, void* targetPtr, void* weaponPtr, int hitMode) {
+            Object* attacker = static_cast<Object*>(attackerPtr);
+            Object* target = static_cast<Object*>(targetPtr);
+            Object* weapon = static_cast<Object*>(weaponPtr);
+            if (attacker != obj_dude) {
+                return VatsShotReject::WrongAttacker;
+            }
+            if (PID_TYPE(attacker->pid) != OBJ_TYPE_CRITTER
+                || (attacker->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+                return VatsShotReject::InactiveAttacker;
+            }
+            if (PID_TYPE(target->pid) != OBJ_TYPE_CRITTER || critter_is_dead(target)) {
+                return VatsShotReject::InactiveTarget;
+            }
+            if (item_hit_with(attacker, hitMode) != weapon
+                || (weapon != NULL && weapon->owner != attacker)) {
+                return VatsShotReject::WeaponMismatch;
+            }
+            return VatsShotReject::None;
+        });
 }
 
 // Asks for a body part and adds the shot to the queue if the action points
 // allow it.
 static void combat_pause_enqueue(Object* target)
 {
-    if (target == NULL || critter_is_dead(target)) {
+    // Look up identities before reading either object, including the selected hand.
+    if (!obj_handle(obj_dude).valid() || !obj_handle(target).valid()) {
         return;
     }
 
@@ -2319,26 +2423,40 @@ static void combat_pause_enqueue(Object* target)
         return;
     }
 
+    Object* weapon = item_hit_with(obj_dude, hitMode);
+    QueuedShot captured = vats_shot_capture(object_registry(), obj_dude, target,
+        weapon, weapon == NULL, hitMode, HIT_LOCATION_UNCALLED, world_sim_epoch());
+    VatsShotValidation resolved = combat_pause_validate(captured);
+    if (resolved.reason != VatsShotReject::None) {
+        return;
+    }
+    Object* attacker = static_cast<Object*>(resolved.attacker);
+    target = static_cast<Object*>(resolved.target);
+
     // A shot that costs more than the whole bar still has to be possible, so no
     // cost goes above the most action points the player can have.
-    int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+    int maxAp = stat_level(attacker, STAT_MAXIMUM_ACTION_POINTS);
 
     int used = 0;
     for (const QueuedShot& shot : combat_pause_building) {
-        int shotCost = item_w_mp_cost(obj_dude, shot.hitMode, true);
+        VatsShotValidation reserved = combat_pause_validate(shot);
+        if (reserved.reason != VatsShotReject::None) {
+            continue;
+        }
+        int shotCost = item_w_mp_cost(static_cast<Object*>(reserved.attacker), shot.hitMode, true);
         used += shotCost < maxAp ? shotCost : maxAp;
     }
 
-    int cost = item_w_mp_cost(obj_dude, hitMode, true);
+    int cost = item_w_mp_cost(attacker, captured.hitMode, true);
     if (cost > maxAp) {
         cost = maxAp;
     }
 
     char message[128];
-    if (used + cost > obj_dude->data.critter.combat.ap) {
+    if (used + cost > attacker->data.critter.combat.ap) {
         snprintf(message, sizeof(message), "Not enough action points: this shot needs %d, you have %d of %d. Time is stopped, so they do not come back until you resume.",
             used + cost,
-            obj_dude->data.critter.combat.ap,
+            attacker->data.critter.combat.ap,
             maxAp);
         display_print(message);
         return;
@@ -2349,18 +2467,22 @@ static void combat_pause_enqueue(Object* target)
         return;
     }
 
-    QueuedShot shot;
-    shot.target = target;
-    shot.hitMode = hitMode;
-    shot.hitLocation = hitLocation;
-    combat_pause_building.push_back(shot);
+    // The modal pumps input. Never reuse the pointers held before it opened.
+    resolved = combat_pause_validate(captured);
+    if (resolved.reason != VatsShotReject::None) {
+        return;
+    }
+    attacker = static_cast<Object*>(resolved.attacker);
+    target = static_cast<Object*>(resolved.target);
+    captured.hitLocation = hitLocation;
+    combat_pause_building.push_back(captured);
     gsound_play_sfx_file("ib1p1xx1");
 
     snprintf(message, sizeof(message), "Shot %d: %s, %s. %d AP left.",
         (int)combat_pause_building.size(),
         object_name(target),
         combat_get_loc_name(target, hitLocation),
-        obj_dude->data.critter.combat.ap - used - cost);
+        attacker->data.critter.combat.ap - used - cost);
     display_print(message);
 }
 
@@ -2370,13 +2492,16 @@ static void combat_pause_fire_next()
     QueuedShot shot = combat_pause_running.front();
     combat_pause_running.erase(combat_pause_running.begin());
 
-    if (shot.target == NULL || critter_is_dead(shot.target)) {
+    VatsShotValidation resolved = combat_pause_validate(shot);
+    if (resolved.reason != VatsShotReject::None) {
         return;
     }
+    Object* attacker = static_cast<Object*>(resolved.attacker);
+    Object* target = static_cast<Object*>(resolved.target);
 
     char message[96];
     combat_vats_firing = true;
-    if (combat_check_bad_shot(obj_dude, shot.target, shot.hitMode, true) != COMBAT_BAD_SHOT_OK) {
+    if (combat_check_bad_shot(attacker, target, shot.hitMode, true) != COMBAT_BAD_SHOT_OK) {
         combat_vats_firing = false;
         snprintf(message, sizeof(message), "A queued shot could not be taken.");
         display_print(message);
@@ -2385,12 +2510,12 @@ static void combat_pause_fire_next()
 
     free_move_stop();
 
-    int facing = tile_dir(obj_dude->tile, shot.target->tile);
-    if (facing != obj_dude->rotation && !critter_is_prone(obj_dude)) {
-        dude_stand(obj_dude, facing, -1);
+    int facing = tile_dir(attacker->tile, target->tile);
+    if (facing != attacker->rotation && !critter_is_prone(attacker)) {
+        dude_stand(attacker, facing, -1);
     }
 
-    combat_attack(obj_dude, shot.target, shot.hitMode, shot.hitLocation);
+    combat_attack(attacker, target, shot.hitMode, shot.hitLocation);
     combat_vats_firing = false;
 }
 
@@ -2398,31 +2523,51 @@ static void combat_pause_fire_next()
 // the pause left shots lined up. Called every frame.
 void combat_vats_update()
 {
-    if (combat_paused) {
+    if (combat_paused || world_sim_world_paused()) {
         return;
     }
 
-    unsigned int now = get_time();
-    if (now - combat_realtime_ap_tick >= REALTIME_AP_INTERVAL) {
-        combat_realtime_ap_tick = now;
+    if (combat_ap_uses_sim_ticks()) {
+        // Pulled here, in the main loop. The tick callback never touches combat.
+        if (obj_dude == NULL) {
+            // No player: nothing is paid out and no action may start.
+            combat_realtime_ap_ticks.disarm();
+            return;
+        }
 
-        int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
-        if (obj_dude->data.critter.combat.ap < maxAp) {
-            obj_dude->data.critter.combat.ap += 1;
-            intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
+        {
+            uint64_t windows = combat_realtime_ap_ticks.take(world_sim_tick_count());
+            int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+            int grant = ap_regen_grant(windows, obj_dude->data.critter.combat.ap, maxAp);
+            if (grant > 0) {
+                combat_ap_grants_total += static_cast<unsigned long long>(grant);
+                obj_dude->data.critter.combat.ap += grant;
+                intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
+            }
+        }
+    } else {
+        unsigned int now = get_time();
+        if (now - combat_realtime_ap_tick >= REALTIME_AP_INTERVAL) {
+            combat_realtime_ap_tick = now;
+
+            int maxAp = stat_level(obj_dude, STAT_MAXIMUM_ACTION_POINTS);
+            if (obj_dude->data.critter.combat.ap < maxAp) {
+                obj_dude->data.critter.combat.ap += 1;
+                intface_update_move_points(obj_dude->data.critter.combat.ap, 0);
+            }
         }
     }
 
     if (!isInCombat() && !combat_pause_running.empty()) {
-        Object* target = combat_pause_running.front().target;
-        if (target == NULL || critter_is_dead(target)) {
+        VatsShotValidation resolved = combat_pause_validate(combat_pause_running.front());
+        if (resolved.reason != VatsShotReject::None) {
             combat_pause_running.erase(combat_pause_running.begin());
             return;
         }
 
         STRUCT_664980 stru;
-        stru.attacker = obj_dude;
-        stru.defender = target;
+        stru.attacker = static_cast<Object*>(resolved.attacker);
+        stru.defender = static_cast<Object*>(resolved.target);
         stru.actionPointsBonus = 0;
         stru.accuracyBonus = 0;
         stru.damageBonus = 0;
@@ -2437,18 +2582,109 @@ void combat_vats_update()
 // creatures it points to are gone.
 static void combat_realtime_forget()
 {
-    combat_realtime_queued_attack = NULL;
+    combat_realtime_queued_attack.cancel();
     combat_pause_building.clear();
     combat_pause_running.clear();
     combat_realtime_next_turn.clear();
     combat_paused = false;
     combat_vats_firing = false;
+
+    // A load or a new game: the ticks that pass before the first read are not
+    // paid out.
+    combat_realtime_ap_ticks.disarm();
 }
 
 // Stops time, in a fight or out of one.
 void combat_vats_pause()
 {
     combat_realtime_pause();
+}
+
+static void combat_buffered_attack_note(BufferedAttackReject reason)
+{
+    const char* name;
+    switch (reason) {
+    case BufferedAttackReject::EpochChanged:
+        name = "epoch_changed";
+        break;
+    case BufferedAttackReject::Expired:
+        name = "expired";
+        break;
+    case BufferedAttackReject::StaleAttacker:
+        name = "stale_attacker";
+        break;
+    case BufferedAttackReject::StaleTarget:
+        name = "stale_target";
+        break;
+    case BufferedAttackReject::StaleWeapon:
+        name = "stale_weapon";
+        break;
+    case BufferedAttackReject::WeaponMismatch:
+        name = "weapon_mismatch";
+        break;
+    default:
+        return;
+    }
+    char line[96];
+    snprintf(line, sizeof(line), "simlog buffered_attack reject=%s", name);
+    sim_service_note(line);
+}
+
+static void combat_buffered_attack_fire(unsigned int now)
+{
+    // take() removes the request first and validates every required reference
+    // before calling this read-only weapon check. No gameplay runs in the check.
+    enum class ActorReject {
+        None,
+        WrongActor,
+        Inactive,
+    };
+    ActorReject actorReject = ActorReject::None;
+    BufferedAttackResult result = combat_realtime_queued_attack.take(object_registry(),
+        world_sim_epoch(), now, [&](const void* actorPtr, const void* weaponPtr, int hitMode) {
+            Object* actor = const_cast<Object*>(static_cast<const Object*>(actorPtr));
+            if (actor != obj_dude) {
+                actorReject = ActorReject::WrongActor;
+                return false;
+            }
+            if (PID_TYPE(actor->pid) != OBJ_TYPE_CRITTER
+                || (actor->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+                actorReject = ActorReject::Inactive;
+                return false;
+            }
+            const Object* weapon = static_cast<const Object*>(weaponPtr);
+            return item_hit_with(actor, hitMode) == weapon
+                && (weapon == NULL || weapon->owner == actor);
+        });
+
+    if (actorReject != ActorReject::None) {
+        sim_service_note(actorReject == ActorReject::WrongActor
+                ? "simlog buffered_attack reject=wrong_actor"
+                : "simlog buffered_attack reject=inactive_attacker");
+        return;
+    }
+    if (!result.request) {
+        combat_buffered_attack_note(result.reason);
+        return;
+    }
+
+    const BufferedAttackRequest& request = *result.request;
+    if (request.kind != BufferedAttackKind::Ordinary) {
+        sim_service_note("simlog buffered_attack reject=wrong_kind");
+        return;
+    }
+    // Resolve again at the execution boundary. No raw target was kept while
+    // waiting, and no target fields are read before the lookup succeeds.
+    Object* target = static_cast<Object*>(object_ref_resolve(object_registry(), request.target, world_sim_epoch()));
+    if (target == NULL || PID_TYPE(target->pid) != OBJ_TYPE_CRITTER) {
+        combat_buffered_attack_note(BufferedAttackReject::StaleTarget);
+        return;
+    }
+    if (critter_is_dead(target)) {
+        sim_service_note("simlog buffered_attack reject=dead_target");
+        return;
+    }
+    combat_attack_this_now(target, request.hitMode);
 }
 
 // Runs the player's side of the fight: movement, actions, and action point
@@ -2461,7 +2697,6 @@ static int combat_realtime_pump()
 
     combat_realtime_pumping = true;
 
-    unsigned int now = get_time();
     combat_vats_update();
 
     // Nothing in real-time combat may leave the interface locked.
@@ -2472,19 +2707,18 @@ static int combat_realtime_pump()
     stick_move_update_combat();
     damage_popup_update();
 
-    int input = get_input();
+    int input = get_input_in(CommandContext::World);
+
+    // get_input() blocks while the window is out of focus, and the pause shifted
+    // the timers by then. `now` has to be read again.
+    unsigned int now = get_time();
+
     camera_follow_update();
 
     // The attack queued while an animation was still running goes out as soon
     // as the shared attack state is free again.
-    if (combat_realtime_queued_attack != NULL && now - combat_realtime_queued_at > REALTIME_ATTACK_BUFFER) {
-        combat_realtime_queued_attack = NULL;
-    }
-
-    if (combat_realtime_queued_attack != NULL && combat_turn_running == 0) {
-        Object* target = combat_realtime_queued_attack;
-        combat_realtime_queued_attack = NULL;
-        combat_attack_this_now(target);
+    if (combat_realtime_queued_attack.pending() && combat_turn_running == 0) {
+        combat_buffered_attack_fire(now);
     }
 
     // The shots lined up during the pause go out one after another.
@@ -2501,7 +2735,7 @@ static void combat_realtime_loop()
     combat_realtime_active = true;
     combat_realtime_last_threat = get_time();
     combat_realtime_next_turn.clear();
-    combat_realtime_queued_attack = NULL;
+    combat_realtime_queued_attack.cancel();
 
     game_ui_enable();
     gmouse_3d_refresh();
@@ -2519,7 +2753,10 @@ static void combat_realtime_loop()
 
     unsigned int now = get_time();
     combat_realtime_ap_tick = now;
-    unsigned int lastSequence = now;
+    if (combat_ap_uses_sim_ticks()) {
+        combat_realtime_ap_ticks.rebase(world_sim_tick_count());
+    }
+    combat_realtime_last_sequence = now;
 
     // The attack that started the fight goes out right away.
     if (gcsd != NULL) {
@@ -2561,10 +2798,10 @@ static void combat_realtime_loop()
 
         // Creatures act one at a time, each on its own timer. They wait while the
         // shots lined up in the pause go out.
-        if (combat_turn_running == 0 && combat_pause_running.empty() && combat_realtime_queued_attack == NULL
+        if (combat_turn_running == 0 && combat_pause_running.empty() && !combat_realtime_queued_attack.pending()
             && get_time() - combat_realtime_enemy_done >= REALTIME_PLAYER_WINDOW) {
-            if (now - lastSequence >= REALTIME_SEQUENCE_INTERVAL) {
-                lastSequence = now;
+            if (now - combat_realtime_last_sequence >= REALTIME_SEQUENCE_INTERVAL) {
+                combat_realtime_last_sequence = now;
                 combat_sequence();
 
                 // Any enemy that still perceives the player keeps the fight on.
@@ -2628,9 +2865,9 @@ static void combat_realtime_loop()
 
         renderPresent();
         sharedFpsLimiter.throttle();
-
     }
     combat_realtime_active = false;
+    combat_realtime_queued_attack.cancel();
     combat_pause_running.clear();
 }
 
@@ -2689,7 +2926,7 @@ static int combat_input()
         stick_move_update_combat();
         camera_follow_update();
 
-        input = get_input();
+        input = get_input_in(CommandContext::World);
 
         if (input == KEY_SPACE) {
             break;
@@ -2940,30 +3177,30 @@ void combat(STRUCT_664980* attack)
         if (combat_realtime && v3 == 0) {
             combat_realtime_loop();
         } else
-        do {
-            if (v6 == -1) {
-                break;
-            }
-
-            for (; v6 < list_com; v6++) {
-                if (combat_turn(combat_list[v6], false) == -1) {
+            do {
+                if (v6 == -1) {
                     break;
                 }
 
-                if (combat_ending_guy != NULL) {
+                for (; v6 < list_com; v6++) {
+                    if (combat_turn(combat_list[v6], false) == -1) {
+                        break;
+                    }
+
+                    if (combat_ending_guy != NULL) {
+                        break;
+                    }
+
+                    gcsd = NULL;
+                }
+
+                if (v6 < list_com) {
                     break;
                 }
 
-                gcsd = NULL;
-            }
-
-            if (v6 < list_com) {
-                break;
-            }
-
-            combat_sequence();
-            v6 = 0;
-        } while (!combat_should_end());
+                combat_sequence();
+                v6 = 0;
+            } while (!combat_should_end());
 
         if (combat_end_due_to_load) {
             game_ui_enable();
@@ -3008,91 +3245,100 @@ void combat_ctd_init(Attack* attack, Object* attacker, Object* defender, int hit
 // 0x420CFC
 int combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocation)
 {
-    bool aiming;
-    int actionPoints;
-
-    if (hitMode == HIT_MODE_PUNCH && roll_random(1, 4) == 1) {
-        int fid = art_id(OBJ_TYPE_CRITTER, attacker->fid & 0xFFF, ANIM_KICK_LEG, (attacker->fid & 0xF000) >> 12, (attacker->fid & 0x70000000) >> 28);
-        if (art_exists(fid)) {
-            hitMode = HIT_MODE_KICK;
-        }
-    }
-
-    combat_ctd_init(&main_ctd, attacker, defender, hitMode, hitLocation);
-    debug_printf("computing attack...\n");
-
-    if (compute_attack(&main_ctd) == -1) {
-        return -1;
-    }
-
-    if (gcsd != NULL) {
-        main_ctd.defenderDamage += gcsd->damageBonus;
-
-        if (main_ctd.defenderDamage < gcsd->minDamage) {
-            main_ctd.defenderDamage = gcsd->minDamage;
+    auto build = [&](AttackInstance& instance) {
+        Attack& attack = instance.attack;
+        bool aiming;
+        if (hitMode == HIT_MODE_PUNCH && roll_random(1, 4) == 1) {
+            int fid = art_id(OBJ_TYPE_CRITTER, attacker->fid & 0xFFF, ANIM_KICK_LEG, (attacker->fid & 0xF000) >> 12, (attacker->fid & 0x70000000) >> 28);
+            if (art_exists(fid)) {
+                hitMode = HIT_MODE_KICK;
+            }
         }
 
-        if (main_ctd.defenderDamage > gcsd->maxDamage) {
-            main_ctd.defenderDamage = gcsd->maxDamage;
+        combat_ctd_init(&attack, attacker, defender, hitMode, hitLocation);
+        debug_printf("computing attack...\n");
+
+        if (compute_attack(&attack) == -1) {
+            return false;
         }
 
-        if (gcsd->field_1C) {
-            // FIXME: looks like a bug, two different fields are used to set
-            // one field.
-            main_ctd.defenderFlags = gcsd->field_20;
-            main_ctd.defenderFlags = gcsd->field_24;
-        }
-    }
+        if (gcsd != NULL) {
+            attack.defenderDamage += gcsd->damageBonus;
 
-    if (main_ctd.defenderHitLocation == HIT_LOCATION_TORSO || main_ctd.defenderHitLocation == HIT_LOCATION_UNCALLED) {
+            if (attack.defenderDamage < gcsd->minDamage) {
+                attack.defenderDamage = gcsd->minDamage;
+            }
+
+            if (attack.defenderDamage > gcsd->maxDamage) {
+                attack.defenderDamage = gcsd->maxDamage;
+            }
+
+            if (gcsd->field_1C) {
+                // FIXME: looks like a bug, two different fields are used to set
+                // one field.
+                attack.defenderFlags = gcsd->field_20;
+                attack.defenderFlags = gcsd->field_24;
+            }
+        }
+
+        if (attack.defenderHitLocation == HIT_LOCATION_TORSO || attack.defenderHitLocation == HIT_LOCATION_UNCALLED) {
+            if (attacker == obj_dude) {
+                intface_get_attack(&hitMode, &aiming);
+            } else {
+                aiming = false;
+            }
+        } else {
+            aiming = true;
+        }
+
+        instance.actionPoints = item_w_mp_cost(attacker, attack.hitMode, aiming);
+        debug_printf("sequencing attack...\n");
+
+        instance.eligibleAmmo = attack.weapon != NULL && item_w_max_ammo(attack.weapon) > 0
+            && item_w_anim(attacker, attack.hitMode) != ANIM_THROW_ANIM;
+        return true;
+    };
+    auto sequence = [](AttackInstance& instance) { return action_attack(&instance.attack) == 0; };
+    auto commit = [&](AttackInstance& instance) {
+        Attack& attack = instance.attack;
+        Object* attacker = attack.attacker;
+        Object* defender = attack.defender;
+        const int actionPoints = instance.actionPoints;
+        {
+            char text[96];
+            snprintf(text, sizeof(text), "combat_attack ok hitMode=%d flags=0x%x damage=%d", attack.hitMode, attack.attackerFlags, attack.defenderDamage);
+        }
+
         if (attacker == obj_dude) {
-            intface_get_attack(&hitMode, &aiming);
-        } else {
-            aiming = false;
+            combat_realtime_last_threat = get_time();
         }
-    } else {
-        aiming = true;
-    }
 
-    actionPoints = item_w_mp_cost(attacker, main_ctd.hitMode, aiming);
-    debug_printf("sequencing attack...\n");
-
-    if (action_attack(&main_ctd) == -1) {
-        return -1;
-    }
-
-    {
-        char text[96];
-        snprintf(text, sizeof(text), "combat_attack ok hitMode=%d flags=0x%x damage=%d", main_ctd.hitMode, main_ctd.attackerFlags, main_ctd.defenderDamage);
-    }
-
-    if (attacker == obj_dude) {
-        combat_realtime_last_threat = get_time();
-    }
-
-    // Real-time combat shows the number above the target when the blow lands.
-    if (combat_realtime && main_ctd.defender != NULL) {
-        bool hit = (main_ctd.attackerFlags & DAM_HIT) != 0;
-        damage_popup_schedule(main_ctd.defender, main_ctd.defenderDamage, hit, (main_ctd.attackerFlags & DAM_CRITICAL) != 0, 220);
-    }
-
-    if (attacker != obj_dude || combat_vats_firing || !combat_realtime) {
-        if (actionPoints > attacker->data.critter.combat.ap) {
-            attacker->data.critter.combat.ap = 0;
-        } else {
-            attacker->data.critter.combat.ap -= actionPoints;
+        // Real-time combat shows the number above the target when the blow lands.
+        if (combat_realtime && attack.defender != NULL) {
+            bool hit = (attack.attackerFlags & DAM_HIT) != 0;
+            damage_popup_schedule(attack.defender, attack.defenderDamage, hit, (attack.attackerFlags & DAM_CRITICAL) != 0, 220);
         }
-    }
 
-    if (attacker == obj_dude) {
-        intface_update_move_points(attacker->data.critter.combat.ap, combat_free_move);
-        critter_set_who_hit_me(attacker, defender);
-    }
+        if (attack_charges_ap(attacker == obj_dude, combat_vats_firing, combat_realtime)) {
+            if (actionPoints > attacker->data.critter.combat.ap) {
+                attacker->data.critter.combat.ap = 0;
+            } else {
+                attacker->data.critter.combat.ap -= actionPoints;
+            }
+        }
 
-    combat_call_display = 1;
-    combat_cleanup_enabled = 1;
+        if (attacker == obj_dude) {
+            intface_update_move_points(attacker->data.critter.combat.ap, combat_free_move);
+            critter_set_who_hit_me(attacker, defender);
+        }
+
+        return true;
+    };
+    bool started = combat_attacks.start(combat_turn_running, object_registry(), world_sim_epoch, [] { return obj_dude; }, build, sequence, commit);
+    if (!started) return -1;
     debug_printf("running attack...\n");
-
+    // Eager register_end completion was deferred until the instance sealed.
+    combat_finish_attack_if_ready();
     return 0;
 }
 
@@ -4021,14 +4267,23 @@ void death_checks(Attack* attack)
 }
 
 // 0x422418
-void apply_damage(Attack* attack, bool animated)
+bool apply_damage(Attack* input, bool animated, const AttackParticipants* captured)
 {
+    Attack local = *input;
+    Attack* attack = &local;
+    const AttackParticipants refs = captured != NULL ? *captured
+                                                     : AttackParticipants(object_registry(), local, world_sim_epoch(), obj_dude);
+    auto checkpoint = [&] { return refs.refresh(object_registry(), world_sim_epoch(), obj_dude, local); };
+    if (!checkpoint()) return false;
     Object* attacker = attack->attacker;
     bool attackerIsCritter = attacker != NULL && FID_TYPE(attacker->fid) == OBJ_TYPE_CRITTER;
 
     if (attackerIsCritter && (attacker->data.critter.combat.results & DAM_DEAD) == 0) {
         set_new_results(attacker, attack->attackerFlags);
-        damage_object(attacker, attack->attackerDamage, animated, attack->defender != attack->oops);
+        if (!checkpoint()) return false;
+        if (!damage_object(attacker, attack->attackerDamage, animated, attack->defender != attack->oops)
+            || !checkpoint()) return false;
+        attacker = attack->attacker;
     }
 
     if (attack->oops != NULL && attack->oops != attack->defender) {
@@ -4040,6 +4295,7 @@ void apply_damage(Attack* attack, bool animated)
 
     if (defenderIsCritter && (defender->data.critter.combat.results & DAM_DEAD) == 0) {
         set_new_results(defender, attack->defenderFlags);
+        if (!checkpoint()) return false;
 
         if (attackerIsCritter) {
             if ((defender->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
@@ -4050,20 +4306,24 @@ void apply_damage(Attack* attack, bool animated)
         }
 
         scr_set_objs(defender->sid, attack->attacker, NULL);
-        damage_object(defender, attack->defenderDamage, animated, attack->defender != attack->oops);
+        if (!damage_object(defender, attack->defenderDamage, animated, attack->defender != attack->oops)
+            || !checkpoint()) return false;
+        defender = attack->defender;
         combatai_notify_onlookers(defender);
 
-        if (attack->defenderDamage >= 0 && (attack->attackerFlags & DAM_HIT) != 0) {
+        if (attack->attacker != NULL && attack->defenderDamage >= 0 && (attack->attackerFlags & DAM_HIT) != 0) {
             scr_set_objs(attack->attacker->sid, NULL, attack->defender);
             scr_set_ext_param(attack->attacker->sid, 2);
-            exec_script_proc(attack->attacker->sid, SCRIPT_PROC_COMBAT);
+            if (!refs.run(object_registry(), world_sim_epoch, [] { return obj_dude; }, local, [&] { exec_script_proc(attack->attacker->sid, SCRIPT_PROC_COMBAT); })) return false;
         }
     }
 
     for (int index = 0; index < attack->extrasLength; index++) {
         Object* obj = attack->extras[index];
+        if (obj == NULL) continue;
         if (FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER && (obj->data.critter.combat.results & DAM_DEAD) == 0) {
             set_new_results(obj, attack->extrasFlags[index]);
+            if (!checkpoint()) return false;
 
             if (attackerIsCritter) {
                 if ((obj->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
@@ -4074,24 +4334,28 @@ void apply_damage(Attack* attack, bool animated)
             }
 
             scr_set_objs(obj->sid, attack->attacker, NULL);
-            damage_object(obj, attack->extrasDamage[index], animated, attack->defender != attack->oops);
+            if (!damage_object(obj, attack->extrasDamage[index], animated, attack->defender != attack->oops)
+                || !checkpoint()) return false;
+            obj = attack->extras[index];
             combatai_notify_onlookers(obj);
 
             if (attack->extrasDamage[index] >= 0) {
-                if ((attack->attackerFlags & DAM_HIT) != 0) {
+                if (attack->attacker != NULL && (attack->attackerFlags & DAM_HIT) != 0) {
                     scr_set_objs(attack->attacker->sid, NULL, obj);
                     scr_set_ext_param(attack->attacker->sid, 2);
-                    exec_script_proc(attack->attacker->sid, SCRIPT_PROC_COMBAT);
+                    if (!refs.run(object_registry(), world_sim_epoch, [] { return obj_dude; }, local, [&] { exec_script_proc(attack->attacker->sid, SCRIPT_PROC_COMBAT); })) return false;
                 }
             }
         }
     }
+    return checkpoint();
 }
 
 // 0x422650
 static void check_for_death(Object* object, int damage, int* flags)
 {
-    if (object == NULL || object->pid != 16777224) {
+    if (object == NULL) return;
+    if (object->pid != 16777224) {
         if (damage > 0) {
             if (critter_get_hits(object) - damage <= 0) {
                 *flags |= DAM_DEAD;
@@ -4139,43 +4403,62 @@ static void set_new_results(Object* critter, int flags)
 }
 
 // 0x422734
-static void damage_object(Object* obj, int damage, bool animated, bool a4)
+static bool damage_object(Object* obj, int damage, bool animated, bool a4)
 {
     if (obj == NULL) {
-        return;
+        return true;
     }
 
+    const ObjectRef objectRef = object_ref_make(object_registry(), obj, world_sim_epoch());
+    const ObjectRef playerRef = object_ref_make(object_registry(), obj_dude, world_sim_epoch());
+    const bool hadPlayer = obj_dude != NULL;
+    auto checkpoint = [&] {
+        obj = static_cast<Object*>(object_ref_resolve(object_registry(), objectRef, world_sim_epoch()));
+        Object* player = static_cast<Object*>(object_ref_resolve(object_registry(), playerRef, world_sim_epoch()));
+        return obj != NULL && (!hadPlayer || (player != NULL && player == obj_dude));
+    };
+    if (!checkpoint()) return false;
+
     if (FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER) {
-        return;
+        return true;
     }
 
     if (obj->pid == 16777224) {
-        return;
+        return true;
     }
 
     if (damage <= 0) {
-        return;
+        return true;
     }
 
     critter_adjust_hits(obj, -damage);
+    if (!checkpoint()) return false;
 
     if (obj == obj_dude) {
         intface_update_hit_points(animated);
+        if (!checkpoint()) return false;
     }
 
     obj->data.critter.combat.damageLastTurn += damage;
 
     if (!a4) {
         exec_script_proc(obj->sid, SCRIPT_PROC_DAMAGE);
+        if (!checkpoint()) return false;
     }
 
     if ((obj->data.critter.combat.results & DAM_DEAD) != 0) {
-        scr_set_objs(obj->sid, obj->data.critter.combat.whoHitMe, NULL);
+        const bool hadKiller = obj->data.critter.combat.whoHitMe != NULL;
+        const ObjectRef killerRef = object_ref_make(object_registry(), obj->data.critter.combat.whoHitMe, world_sim_epoch());
+        Object* whoHitMe = static_cast<Object*>(object_ref_resolve(object_registry(), killerRef, world_sim_epoch()));
+        if (hadKiller && whoHitMe == NULL) return false;
+        scr_set_objs(obj->sid, whoHitMe, NULL);
         exec_script_proc(obj->sid, SCRIPT_PROC_DESTROY);
+        if (!checkpoint()) return false;
+        whoHitMe = static_cast<Object*>(object_ref_resolve(object_registry(), killerRef, world_sim_epoch()));
+        if (hadKiller && whoHitMe == NULL) return false;
 
         if (obj != obj_dude) {
-            Object* whoHitMe = obj->data.critter.combat.whoHitMe;
-            if (whoHitMe == obj_dude || (whoHitMe != NULL && whoHitMe->data.critter.combat.team == obj_dude->data.critter.combat.team)) {
+            if (obj_dude != NULL && (whoHitMe == obj_dude || (whoHitMe != NULL && whoHitMe->data.critter.combat.team == obj_dude->data.critter.combat.team))) {
                 bool scriptOverrides = false;
                 Script* scr;
                 if (scr_ptr(obj->sid, &scr) != -1) {
@@ -4196,6 +4479,7 @@ static void damage_object(Object* obj, int damage, bool animated, bool a4)
 
         partyMemberRemove(obj);
     }
+    return checkpoint();
 }
 
 // Print attack description to monitor.
@@ -4608,78 +4892,78 @@ static void combat_display_flags(char* dest, int flags, Object* critter)
 }
 
 // 0x42344C
-void combat_anim_begin()
+CombatAnimationLease combat_anim_begin()
 {
+    CombatAnimationLease lease = combat_animation_leases.begin();
+    if (!lease.valid()) return lease;
+    combat_turn_running = combat_animation_leases.count();
     // Real-time combat never locks the interface during an animation. Several
     // animations run at once, so the lock would often stay on and swallow
     // clicks.
-    if (++combat_turn_running == 1 && obj_dude == main_ctd.attacker && !combat_realtime) {
+    const auto instance = combat_attacks.active();
+    Object* owner = instance ? instance->attack.attacker : main_ctd.attacker;
+    if (combat_turn_running == 1 && obj_dude == owner && !combat_realtime) {
         game_ui_disable(1);
         gmouse_set_cursor(26);
         if (combat_highlight == 2) {
             combat_outline_off();
         }
     }
+    return lease;
 }
 
 // 0x423490
-void combat_anim_finished()
+void combat_anim_finished(CombatAnimationLease lease)
 {
-    combat_turn_running -= 1;
-    if (combat_turn_running != 0) {
+    if (!combat_animation_leases.finish(lease)) return;
+    combat_turn_running = combat_animation_leases.count();
+    combat_finish_attack_if_ready();
+}
+
+static void combat_finish_attack_if_ready()
+{
+    if (combat_turn_running != 0 || combat_attacks.busy()) return;
+    if (!combat_attacks.active()) {
+        // Stand/move sequences outside an attack retain classic turn UI behavior.
+        if (obj_dude == main_ctd.attacker && obj_handle(obj_dude).valid()) game_ui_enable();
         return;
     }
-
-    if (obj_dude == main_ctd.attacker) {
-        game_ui_enable();
-    }
-
-    if (combat_cleanup_enabled) {
-        combat_cleanup_enabled = false;
-
-        Object* weapon = item_hit_with(main_ctd.attacker, main_ctd.hitMode);
-        if (weapon != NULL) {
-            if (item_w_max_ammo(weapon) > 0) {
-                int ammoQuantity = item_w_curr_ammo(weapon);
-                item_w_set_curr_ammo(weapon, ammoQuantity - main_ctd.ammoQuantity);
-
-                if (main_ctd.attacker == obj_dude) {
-                    intface_update_ammo_lights();
-                }
-            }
-        }
-
-        if (combat_call_display) {
-            combat_display(&main_ctd);
-            combat_call_display = false;
-        }
-
-        apply_damage(&main_ctd, true);
-
-        Object* attacker = main_ctd.attacker;
-        if (attacker == obj_dude && combat_highlight == 2) {
-            combat_outline_on();
-        }
-
-        if (scr_end_combat()) {
+    SerializedAttack::Completion hooks;
+    hooks.ready = [](AttackInstance& instance) {
+        if (obj_dude == instance.attack.attacker && obj_handle(obj_dude).valid()) game_ui_enable();
+    };
+    hooks.debit = [](void* weaponPtr, int quantity) {
+        Object* weapon = static_cast<Object*>(weaponPtr);
+        item_w_set_curr_ammo(weapon, item_w_curr_ammo(weapon) - quantity);
+    };
+    hooks.ammoDebited = [](AttackInstance& instance) {
+        if (instance.attack.attacker == obj_dude && obj_handle(obj_dude).valid()) intface_update_ammo_lights();
+    };
+    hooks.display = [](AttackInstance& instance) { combat_display(&instance.attack); };
+    hooks.damage = [](AttackInstance& instance) { return apply_damage(&instance.attack, true, &instance.participants); };
+    hooks.afterDamage = [](AttackInstance& instance) {
+        if (instance.attack.attacker == obj_dude && combat_highlight == 2) combat_outline_on();
+    };
+    hooks.endCombat = [](AttackInstance&) { return scr_end_combat(); };
+    hooks.afterEnd = [](AttackInstance& instance, bool scriptEndedCombat) {
+        Object* attacker = instance.attack.attacker;
+        if (scriptEndedCombat) {
             if ((obj_dude->data.critter.combat.results & DAM_KNOCKED_OUT) != 0) {
-                if (attacker->data.critter.combat.team == obj_dude->data.critter.combat.team) {
+                if (attacker->data.critter.combat.team == obj_dude->data.critter.combat.team)
                     combat_ending_guy = obj_dude->data.critter.combat.whoHitMe;
-                } else {
+                else
                     combat_ending_guy = attacker;
-                }
             }
         }
-
-        combat_ctd_init(&main_ctd, main_ctd.attacker, NULL, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
-
-        if ((attacker->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) != 0) {
-            if ((attacker->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD | DAM_LOSE_TURN)) == 0) {
-                // NOTE: Uninline.
-                combat_standup(attacker);
-            }
-        }
-    }
+        combat_ctd_init(&main_ctd, attacker, NULL, HIT_MODE_PUNCH, HIT_LOCATION_TORSO);
+        if ((attacker->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_KNOCKED_DOWN)) != 0
+            && (attacker->data.critter.combat.results & (DAM_KNOCKED_OUT | DAM_DEAD | DAM_LOSE_TURN)) == 0) combat_standup(attacker);
+    };
+    hooks.abort = [] {
+        if (obj_handle(obj_dude).valid()) game_ui_enable();
+        sim_service_note("simlog combat completion participant_invalid");
+    };
+    combat_attacks.finish(combat_turn_running, object_registry(), world_sim_epoch, [] { return obj_dude; }, hooks);
 }
 
 // 0x4235FC
@@ -4749,17 +5033,21 @@ static void draw_loc_on(int btn, int input)
 // 0x4237E0
 static void draw_loc(int input, int color)
 {
+    Object* target = static_cast<Object*>(object_ref_resolve(object_registry(), call_target, world_sim_epoch()));
+    if (target == NULL || critter_is_dead(target)) {
+        return;
+    }
     char* name;
 
     color |= 0x2000000 | 0x1000000;
 
     if (input >= 4) {
-        name = combat_get_loc_name(call_target, hit_loc_right[input - 4]);
+        name = combat_get_loc_name(target, hit_loc_right[input - 4]);
         if (name != NULL) {
             win_print(call_win, name, 0, 351 - text_width(name), call_ty[input - 4] - 86, color);
         }
     } else {
-        name = combat_get_loc_name(call_target, hit_loc_left[input]);
+        name = combat_get_loc_name(target, hit_loc_left[input]);
         if (name != NULL) {
             win_print(call_win, name, 0, 74, call_ty[input] - 86, color);
         }
@@ -4769,7 +5057,15 @@ static void draw_loc(int input, int color)
 // 0x42382C
 static int get_called_shot_location(Object* critter, int* hit_location, int hit_mode)
 {
-    call_target = critter;
+    const ObjectRef critterRef = object_ref_make(object_registry(), critter, world_sim_epoch());
+    critter = static_cast<Object*>(object_ref_resolve(object_registry(), critterRef, world_sim_epoch()));
+    if (critter == NULL || !obj_handle(obj_dude).valid()) {
+        return -1;
+    }
+    call_target = critterRef;
+    struct ClearCallTarget {
+        ~ClearCallTarget() { call_target = ObjectRef(); }
+    } clearCallTarget;
 
     int calledShotWindowX = (screenGetWidth() - CALLED_SHOT_WINDOW_WIDTH) / 2;
     int calledShotWindowY = screenGetHeight() != 480
@@ -4916,6 +5212,12 @@ static int get_called_shot_location(Object* critter, int* hit_location, int hit_
 
         eventCode = get_input();
 
+        Object* currentTarget = static_cast<Object*>(object_ref_resolve(object_registry(), critterRef, world_sim_epoch()));
+        if (currentTarget == NULL || critter_is_dead(currentTarget)) {
+            eventCode = KEY_ESCAPE;
+            break;
+        }
+
         if (eventCode == KEY_ESCAPE) {
             break;
         }
@@ -5047,15 +5349,27 @@ void combat_attack_this(Object* a1)
     // Only one attack can be in flight, because they share one state. A new one
     // waits for the current one to finish.
     if (combat_realtime_active && combat_turn_running != 0) {
-        combat_realtime_queued_attack = a1;
-        combat_realtime_queued_at = get_time();
+        // No object pointer is retained. The registry lookup itself never
+        // dereferences an address, including one invalidated by an earlier event.
+        if (!obj_handle(obj_dude).valid() || !obj_handle(a1).valid()) {
+            return;
+        }
+        int hitMode;
+        bool aiming;
+        if (intface_get_attack(&hitMode, &aiming) == -1) {
+            return;
+        }
+        Object* weapon = item_hit_with(obj_dude, hitMode);
+        combat_realtime_queued_attack.put(buffered_attack_capture(object_registry(),
+            obj_dude, a1, weapon, weapon == NULL, hitMode,
+            BufferedAttackKind::Ordinary, world_sim_epoch(), get_time()));
         return;
     }
 
     combat_attack_this_now(a1);
 }
 
-static void combat_attack_this_now(Object* a1)
+static void combat_attack_this_now(Object* a1, std::optional<int> capturedHitMode)
 {
     if (a1 == NULL) {
         return;
@@ -5066,9 +5380,13 @@ static void combat_attack_this_now(Object* a1)
     }
 
     int hitMode;
-    bool aiming;
-    if (intface_get_attack(&hitMode, &aiming) == -1) {
-        return;
+    bool aiming = false;
+    if (capturedHitMode) {
+        hitMode = *capturedHitMode;
+    } else {
+        if (intface_get_attack(&hitMode, &aiming) == -1) {
+            return;
+        }
     }
 
     // Aiming a body part belongs to the pause. In real time every click is a
@@ -5101,13 +5419,9 @@ static void combat_attack_this_now(Object* a1)
         }
         return;
     case COMBAT_BAD_SHOT_NOT_ENOUGH_AP:
-        // Hold the press until the action points are back, so the player can
-        // keep the button down and attack as fast as the cooldown allows.
+        // Ordinary real-time attacks do not spend AP. Do not turn this
+        // unexpected result into an uncaptured retry or a VATS shot.
         if (combat_realtime_active) {
-            if (combat_realtime_queued_attack == NULL) {
-                combat_realtime_queued_at = get_time();
-            }
-            combat_realtime_queued_attack = a1;
             return;
         }
 
@@ -5140,7 +5454,6 @@ static void combat_attack_this_now(Object* a1)
         }
         return;
     }
-
 
     // Face the target first. A swing that starts while the player still looks
     // the other way would punch the air.

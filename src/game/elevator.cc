@@ -3,6 +3,8 @@
 #include <ctype.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/art.h"
 #include "game/cycle.h"
 #include "game/gmouse.h"
@@ -18,6 +20,7 @@
 #include "plib/gnw/input.h"
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -229,6 +232,9 @@ static unsigned char* win_buf;
 // 0x56ED60
 static bool bk_enable;
 
+// Holds the world pause while the elevator panel is open.
+static std::optional<ModalPause> elevator_pause;
+
 // 0x56ED64
 static CacheEntry* grph_key[ELEVATOR_FRM_COUNT];
 
@@ -372,6 +378,7 @@ int elevator_select(int elevator, int* mapPtr, int* elevationPtr, int* tilePtr)
 // 0x43821C
 static int elevator_start(int elevator)
 {
+    elevator_pause.emplace();
     bk_enable = map_disable_bk_processes();
     cycle_disable();
 
@@ -397,6 +404,7 @@ static int elevator_start(int elevator)
         if (bk_enable) {
             map_enable_bk_processes();
         }
+        elevator_pause.reset();
 
         cycle_enable();
         gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -441,6 +449,7 @@ static int elevator_start(int elevator)
         if (bk_enable) {
             map_enable_bk_processes();
         }
+        elevator_pause.reset();
 
         cycle_enable();
         gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -472,6 +481,7 @@ static int elevator_start(int elevator)
         if (bk_enable) {
             map_enable_bk_processes();
         }
+        elevator_pause.reset();
 
         cycle_enable();
         gmouse_set_cursor(MOUSE_CURSOR_ARROW);
@@ -534,6 +544,7 @@ static void elevator_end()
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    elevator_pause.reset();
 
     cycle_enable();
 

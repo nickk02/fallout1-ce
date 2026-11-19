@@ -74,9 +74,11 @@ int queue_add(int delay, Object* owner, void* data, int eventType);
 int queue_remove(Object* owner);
 int queue_remove_this(Object* owner, int eventType);
 bool queue_find(Object* owner, int eventType);
+bool queue_process_one(int time, int* handlerResult);
 int queue_process();
 void queue_clear();
 void queue_clear_type(int eventType, QueueEventHandler* fn);
+bool queue_peek_time(int* time);
 int queue_next_time();
 void queue_leaving_map();
 

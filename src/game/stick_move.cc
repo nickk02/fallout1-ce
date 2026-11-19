@@ -1,4 +1,5 @@
 #include "game/stick_move.h"
+#include "sim/world_sim.h"
 
 #include <math.h>
 
@@ -11,6 +12,7 @@
 #include "game/soft_target.h"
 #include "game/tile.h"
 #include "plib/gnw/controller.h"
+#include "plib/gnw/game_commands.h"
 #include "plib/gnw/input.h"
 
 namespace fallout {
@@ -56,7 +58,14 @@ static void stick_move_update_impl(bool inCombat, bool paused)
 {
     // The loop is running, so the controller drives the character and not a
     // cursor, even when a script has locked the interface for a moment.
+    const bool simMovement = free_move_uses_sim_ticks();
+    if (simMovement) {
+        if (paused || game_ui_is_disabled() || game_commands().context() != CommandContext::World) free_move_sim_cancel();
+        if (!world_sim_drain()) return;
+    }
     controller_world_tick();
+    free_move_validate_owner();
+    if (simMovement && !paused && free_move_dispatch_pending()) return;
 
     if (game_ui_is_disabled() || (!inCombat && isInCombat())) {
         free_move_stop();
@@ -109,6 +118,10 @@ static void stick_move_update_impl(bool inCombat, bool paused)
     }
 
     if (!stick_move_get_vector(&x, &y, &walkOnly)) {
+        if (simMovement) {
+            free_move_sim_sample(0, 0, false);
+            return;
+        }
         // A click on the ground walks there the same way the keys do.
         if (free_move_goto_active()) {
             free_move_goto_step(elapsed);
@@ -120,7 +133,7 @@ static void stick_move_update_impl(bool inCombat, bool paused)
     }
 
     // The keys or the stick take over from a walk to a clicked tile.
-    free_move_goto_cancel();
+    if (!simMovement) free_move_goto_cancel();
 
     // Glide in the direction asked for, as opposed to following hex steps.
 
@@ -130,7 +143,10 @@ static void stick_move_update_impl(bool inCombat, bool paused)
     float deflection = sqrtf(x * x + y * y);
     bool running = !walkOnly && deflection >= (wasRunning ? STICK_MOVE_RUN_THRESHOLD - 0.15f : STICK_MOVE_RUN_THRESHOLD);
     wasRunning = running;
-    free_move_step(x, y, running, elapsed);
+    if (simMovement)
+        free_move_sim_sample(x, y, running);
+    else
+        free_move_step(x, y, running, elapsed);
 }
 
 // Combines the left stick and WASD into one screen direction. Holding Shift

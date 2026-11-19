@@ -1,4 +1,7 @@
 #include "game/anim.h"
+#include "game/free_move.h"
+#include "sim/animation_callbacks.h"
+#include "sim/sequence_serial.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -292,6 +295,21 @@ static PathNode dad[2000];
 
 // 0x560314
 static AnimationSequence anim_set[ANIMATION_SEQUENCE_LIST_CAPACITY];
+static AnimationLeaseSlot animation_leases[ANIMATION_SEQUENCE_LIST_CAPACITY];
+static AnimationCallbacks animation_callbacks[ANIMATION_SEQUENCE_LIST_CAPACITY];
+static_assert(AnimationCallbacks::kCapacity == ANIMATION_DESCRIPTION_LIST_CAPACITY, "Callback capacity must match descriptors");
+
+// Names a registered sequence for the player's click routes. A slot gets a new
+// serial at every register_begin, so a number kept earlier never names a later
+// sequence that reuses the slot. Zero means none.
+static SequenceSerials anim_serials;
+static uint64_t anim_slot_serial[ANIMATION_SEQUENCE_LIST_CAPACITY];
+
+static uint64_t anim_serial_of(int index)
+{
+    return index >= 0 && index < ANIMATION_SEQUENCE_LIST_CAPACITY ? anim_slot_serial[index] : 0;
+}
+static_assert(ANIMATION_SEQUENCE_LIST_CAPACITY == CombatAnimationLeases::kCapacity, "Lease capacity must cover all animation slots");
 
 // 0x56A1E4
 static unsigned char seen[5000];
@@ -313,20 +331,22 @@ void anim_init()
 // 0x4134D0
 void anim_reset()
 {
-    int index;
-
     if (!anim_in_init) {
         // NOTE: Uninline.
         anim_stop();
     }
 
-    curr_sad = 0;
-    curr_anim_set = -1;
-
-    for (index = 0; index < ANIMATION_SEQUENCE_LIST_CAPACITY; index++) {
+    std::array<AnimationCallbacks, ANIMATION_SEQUENCE_LIST_CAPACITY> retired;
+    for (int index = 0; index < ANIMATION_SEQUENCE_LIST_CAPACITY; index++) {
+        retired[index] = animation_callbacks[index].detach();
+        animation_leases[index].reset();
         anim_set[index].field_0 = -1000;
         anim_set[index].flags = 0;
     }
+    curr_sad = 0;
+    curr_anim_set = -1;
+    curr_anim_counter = 0;
+    // All slots are finalized before retired payloads can reenter.
 }
 
 // 0x413548
@@ -343,6 +363,11 @@ int register_begin(int requestOptions)
         return -1;
     }
 
+    // No serial left: fail before anything is taken.
+    if (!anim_serials.canIssue()) {
+        return -1;
+    }
+
     if (anim_in_anim_stop) {
         return -1;
     }
@@ -352,6 +377,9 @@ int register_begin(int requestOptions)
         return -1;
     }
 
+    auto retired = animation_callbacks[v1].detach();
+    animation_leases[v1].reset();
+    if (!animation_leases[v1].begin()) return -1;
     AnimationSequence* animationSequence = &(anim_set[v1]);
     animationSequence->flags |= ANIM_SEQ_ACCUMULATING;
 
@@ -368,9 +396,13 @@ int register_begin(int requestOptions)
     }
 
     curr_anim_set = v1;
-
+    anim_slot_serial[v1] = anim_serials.issue();
+    const uint64_t serial = anim_slot_serial[v1];
+    animation_callbacks[v1].begin(serial);
     curr_anim_counter = 0;
-
+    retired.clear();
+    // Disposal can reset the engine or begin another registration.
+    if (curr_anim_set != v1 || anim_serial_of(v1) != serial || (animationSequence->flags & ANIM_SEQ_ACCUMULATING) == 0) return -1;
     return 0;
 }
 
@@ -422,6 +454,7 @@ int register_priority(int a1)
 // 0x413708
 int register_clear(Object* a1)
 {
+    free_move_yield(a1);
     for (int animationSequenceIndex = 0; animationSequenceIndex < ANIMATION_SEQUENCE_LIST_CAPACITY; animationSequenceIndex++) {
         AnimationSequence* animationSequence = &(anim_set[animationSequenceIndex]);
         if (animationSequence->field_0 == -1000) {
@@ -462,15 +495,19 @@ int register_end()
     }
 
     AnimationSequence* animationSequence = &(anim_set[curr_anim_set]);
+    if (isInCombat()) {
+        animation_leases[curr_anim_set].lease = combat_anim_begin();
+        if (!animation_leases[curr_anim_set].lease.valid()) {
+            anim_cleanup();
+            return -1;
+        }
+        animationSequence->flags |= ANIM_SEQ_COMBAT_ANIM_STARTED;
+    }
     animationSequence->field_0 = 0;
     animationSequence->length = curr_anim_counter;
     animationSequence->animationIndex = -1;
     animationSequence->flags &= ~ANIM_SEQ_ACCUMULATING;
     animationSequence->animations[0].delay = 0;
-    if (isInCombat()) {
-        combat_anim_begin();
-        animationSequence->flags |= ANIM_SEQ_COMBAT_ANIM_STARTED;
-    }
 
     int v1 = curr_anim_set;
     curr_anim_set = -1;
@@ -519,12 +556,15 @@ static void anim_cleanup()
         }
     }
 
-    curr_anim_set = -1;
+    const int discardedIndex = curr_anim_set;
+    discard_animation_registration(animation_callbacks[discardedIndex], animation_leases[discardedIndex], curr_anim_set, curr_anim_counter);
 }
 
 // 0x41390C
 int check_registry(Object* obj)
 {
+    // Yield even when registration fails. NULL denotes opaque callbacks.
+    if (obj != NULL) free_move_yield(obj);
     if (curr_anim_set == -1) {
         return -1;
     }
@@ -549,6 +589,9 @@ int check_registry(Object* obj)
                     }
 
                     anim_set_end(animationSequenceIndex);
+                    // Forced callbacks may have started continuous movement.
+                    // This registration still takes precedence over that owner.
+                    free_move_yield(obj);
                 }
             }
         }
@@ -589,6 +632,62 @@ int anim_busy(Object* a1)
     }
 
     return 0;
+}
+
+uint64_t anim_serial_mark()
+{
+    return anim_serials.last();
+}
+
+uint64_t anim_auto_stand_serial()
+{
+    return anim_serials.standing();
+}
+
+int anim_actor_sequences_since(const Object* actor, uint64_t mark, uint64_t* out, int capacity)
+{
+    int found = 0;
+    if (actor == NULL || out == NULL) return 0;
+    for (int i = 0; i < ANIMATION_SEQUENCE_LIST_CAPACITY && found < capacity; i++) {
+        const AnimationSequence& sequence = anim_set[i];
+        bool accumulating = i == curr_anim_set;
+        if ((!accumulating && sequence.field_0 == -1000) || anim_slot_serial[i] <= mark) continue;
+        int count = accumulating ? curr_anim_counter : sequence.length;
+        for (int j = 0; j < count; j++) {
+            const AnimationDescription& description = sequence.animations[j];
+            if (description.kind == ANIM_KIND_CALLBACK || description.kind == ANIM_KIND_CALLBACK3 || description.kind == ANIM_KIND_26 || description.kind == ANIM_KIND_NOOP) continue;
+            if (description.owner == actor) {
+                out[found++] = anim_slot_serial[i];
+                break;
+            }
+        }
+    }
+    return found;
+}
+
+bool anim_actor_has_work(const Object* actor)
+{
+    if (actor == NULL) return false;
+    for (int i = 0; i < ANIMATION_SEQUENCE_LIST_CAPACITY; i++) {
+        const AnimationSequence& sequence = anim_set[i];
+        bool accumulating = i == curr_anim_set;
+        if (!accumulating && sequence.field_0 == -1000) continue;
+        int count = accumulating ? curr_anim_counter : sequence.length;
+        for (int j = 0; j < count; j++) {
+            const AnimationDescription& description = sequence.animations[j];
+            switch (description.kind) {
+            case ANIM_KIND_CALLBACK:
+            case ANIM_KIND_CALLBACK3:
+            case ANIM_KIND_26:
+            case ANIM_KIND_NOOP:
+                break;
+            default:
+                if (description.owner == actor) return true;
+                break;
+            }
+        }
+    }
+    return false;
 }
 
 // 0x413A3C
@@ -1080,6 +1179,30 @@ int register_object_must_erase(Object* object)
 }
 
 // 0x4148BC
+int register_owned_callback(std::unique_ptr<AnimationPayload> payload, int delay, bool forced)
+{
+    if (check_registry(NULL) == -1 || !payload) {
+        anim_cleanup();
+        return -1;
+    }
+    const int index = curr_anim_set;
+    const uint64_t serial = anim_serial_of(index);
+    if (!animation_callbacks[index].add(serial, curr_anim_counter, std::move(payload), forced)) {
+        // The rejected payload is disposed inside add, which can reenter.
+        if (curr_anim_set == index && anim_serial_of(index) == serial) anim_cleanup();
+        return -1;
+    }
+    AnimationDescription* desc = &anim_set[curr_anim_set].animations[curr_anim_counter++];
+    desc->kind = ANIM_KIND_CALLBACK;
+    desc->extendedFlags = forced ? ANIMATION_SEQUENCE_FORCED : 0;
+    desc->artCacheKey = NULL;
+    desc->param1 = NULL;
+    desc->param2 = NULL;
+    desc->callback = NULL;
+    desc->delay = delay;
+    return 0;
+}
+
 int register_object_call(void* a1, void* a2, AnimationCallback* proc, int delay)
 {
     if (check_registry(NULL) == -1 || proc == NULL) {
@@ -1479,6 +1602,7 @@ static int anim_set_check(int animationSequenceIndex)
         case ANIM_KIND_ROTATE_TO_TILE:
             if (!critter_is_prone(animationDescription->owner)) {
                 int rotation = tile_dir(animationDescription->owner->tile, animationDescription->tile);
+                SequenceSerials::StandScope standing(anim_serials, anim_serial_of(animationSequenceIndex));
                 dude_stand(animationDescription->owner, rotation, -1);
             }
             anim_set_continue(animationSequenceIndex, 0);
@@ -1494,12 +1618,24 @@ static int anim_set_check(int animationSequenceIndex)
             // NOTE: Uninline.
             rc = anim_hide(animationDescription->owner, animationSequenceIndex);
             break;
-        case ANIM_KIND_CALLBACK:
-            rc = animationDescription->callback(animationDescription->param1, animationDescription->param2);
+        case ANIM_KIND_CALLBACK: {
+            const uint64_t serial = anim_serial_of(animationSequenceIndex);
+            const int descriptionIndex = static_cast<int>(animationDescription - animationSequence->animations);
+            const bool owned = animation_callbacks[animationSequenceIndex].owns(serial, descriptionIndex);
+            if (owned) {
+                const auto delivery = animation_callbacks[animationSequenceIndex].dispatch(serial, descriptionIndex, true);
+                rc = delivery.result;
+                // The callback may reset, finish, or replace this slot.
+                if (!delivery.current || anim_serial_of(animationSequenceIndex) != serial || animationSequence->field_0 == -1000) return -1;
+            } else {
+                rc = animationDescription->callback(animationDescription->param1, animationDescription->param2);
+            }
             if (rc == 0) {
                 rc = anim_set_continue(animationSequenceIndex, 0);
+                if (owned && (anim_serial_of(animationSequenceIndex) != serial || animationSequence->field_0 == -1000)) return -1;
             }
             break;
+        }
         case ANIM_KIND_CALLBACK3:
             rc = animationDescription->callback3(animationDescription->param1, animationDescription->param2, animationDescription->param3);
             if (rc == 0) {
@@ -1636,6 +1772,13 @@ static int anim_set_end(int animationSequenceIndex)
         return -1;
     }
 
+    const AnimationLeaseSlot::End ending = animation_leases[animationSequenceIndex].claimEnd();
+    if (!ending.valid) return -1;
+    auto finishLease = [&] {
+        combat_anim_finished(ending.lease);
+        return 0;
+    };
+
     for (i = 0; i < curr_sad; i++) {
         AnimationSad* sad_entry = &(sad[i]);
         if (sad_entry->animationSequenceIndex == animationSequenceIndex) {
@@ -1649,6 +1792,7 @@ static int anim_set_end(int animationSequenceIndex)
             Rect rect;
             int elevation = animationDescription->owner->elevation;
             obj_erase_object(animationDescription->owner, &rect);
+            if (!animation_leases[animationSequenceIndex].current(ending)) return finishLease();
             tile_refresh_rect(&rect, elevation);
         }
     }
@@ -1692,15 +1836,23 @@ static int anim_set_end(int animationSequenceIndex)
                             }
 
                             if ((animationSequence->flags & ANIM_SEQ_NO_STAND) == 0 && !critter_is_prone(owner)) {
+                                SequenceSerials::StandScope standing(anim_serials, anim_serial_of(animationSequenceIndex));
                                 dude_stand(owner, owner->rotation, -1);
                             }
                         }
                     }
                 }
             }
+        } else if (animation_callbacks[animationSequenceIndex].owns(anim_serial_of(animationSequenceIndex), i)) {
+            const uint64_t serial = anim_serial_of(animationSequenceIndex);
+            // Already executed payloads are detached. Remaining forced payloads
+            // run, while nonforced ones are disposed by the same dispatcher.
+            const auto delivery = animation_callbacks[animationSequenceIndex].dispatch(serial, i, false);
+            if (!delivery.current || !animation_leases[animationSequenceIndex].current(ending) || anim_serial_of(animationSequenceIndex) != serial) return finishLease();
         } else if (i >= animationSequence->field_0) {
             if (animationDescription->extendedFlags & ANIMATION_SEQUENCE_FORCED) {
                 animationDescription->callback(animationDescription->param1, animationDescription->param2);
+                if (!animation_leases[animationSequenceIndex].current(ending)) return finishLease();
             } else {
                 if (animationDescription->kind == ANIM_KIND_CALLBACK && animationDescription->callback == (AnimationCallback*)gsnd_anim_sound) {
                     gsound_delete_sfx((Sound*)animationDescription->param1);
@@ -1709,19 +1861,19 @@ static int anim_set_end(int animationSequenceIndex)
         }
     }
 
+    auto retired = animation_callbacks[animationSequenceIndex].detach();
     animationSequence->animationIndex = -1;
     animationSequence->field_0 = -1000;
-    if ((animationSequence->flags & ANIM_SEQ_COMBAT_ANIM_STARTED) != 0) {
-        combat_anim_finished();
-    }
-
     if (anim_in_bk) {
         animationSequence->flags = ANIM_SEQ_0x20;
     } else {
         animationSequence->flags = 0;
     }
 
-    return 0;
+    animation_leases[animationSequenceIndex].complete(ending);
+    retired.clear();
+    // No slot writes after disposal or completion: either can reuse this slot.
+    return finishLease();
 }
 
 // 0x415940
@@ -3208,6 +3360,7 @@ void dude_fidget()
 // 0x417CB0
 void dude_stand(Object* obj, int rotation, int fid)
 {
+    free_move_yield(obj);
     Rect rect;
 
     obj_set_rotation(obj, rotation, &rect);
@@ -3302,6 +3455,7 @@ static int anim_turn_towards(Object* obj, int delta, int animationSequenceIndex)
             rotation = ROTATION_NW;
         }
 
+        SequenceSerials::StandScope standing(anim_serials, anim_serial_of(animationSequenceIndex));
         dude_stand(obj, rotation, -1);
     }
 
@@ -3349,17 +3503,24 @@ int anim_change_fid(Object* obj, int animationSequenceIndex, int fid)
 // 0x418004
 void anim_stop()
 {
-    int index;
-
+    const bool wasStopping = anim_in_anim_stop;
     anim_in_anim_stop = true;
+    anim_cleanup();
     curr_anim_set = -1;
+    std::array<AnimationCallbacks, ANIMATION_SEQUENCE_LIST_CAPACITY> retired;
 
-    for (index = 0; index < ANIMATION_SEQUENCE_LIST_CAPACITY; index++) {
+    for (int index = 0; index < ANIMATION_SEQUENCE_LIST_CAPACITY; index++) {
+        const uint64_t serial = anim_serial_of(index);
         anim_set_end(index);
+        // Includes abandoned accumulating sequences that have not register_end'd.
+        // A reset callback can replace the slot before this frame resumes.
+        if (anim_serial_of(index) == serial && anim_set[index].field_0 == -1000) retired[index] = animation_callbacks[index].detach();
     }
 
-    anim_in_anim_stop = false;
     curr_sad = 0;
+    anim_in_anim_stop = wasStopping;
+    // Retired destructors run after all stop writes. A nested stop must retain
+    // the outer registration barrier until the outer operation finishes.
 }
 
 // 0x418040

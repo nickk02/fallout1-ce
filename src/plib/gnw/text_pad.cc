@@ -4,8 +4,8 @@
 #include <math.h>
 
 #include "plib/color/color.h"
-#include "plib/gnw/grbuf.h"
 #include "plib/gnw/gnw.h"
+#include "plib/gnw/grbuf.h"
 #include "plib/gnw/input.h"
 #include "plib/gnw/menu_focus.h"
 #include "plib/gnw/svga.h"

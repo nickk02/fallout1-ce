@@ -29,9 +29,16 @@ void controller_exit();
 // Handles device connect and disconnect events, and button presses.
 void controller_handle_event(SDL_Event* event);
 
+// Evaluates the last right stick sample of the events just handled. Called
+// once after each pump of the SDL event queue.
+void controller_flush_axis_events();
+
 // Ignores the controller until every button is released and the stick is
 // centered again. Called when the window loses focus.
 void controller_focus_lost();
+void controller_focus_gained();
+void controller_begin_pump();
+void controller_end_pump();
 
 // The game calls this every frame while the map or combat loop runs and the
 // player controls the character. While it runs, the controller drives the
@@ -51,8 +58,9 @@ bool controller_get_move_vector(float* x, float* y);
 // Keyboard keys that do what the controller's buttons do while the world loop
 // runs: E interacts, F attacks, Q inspects, K opens the skilldex (S moves the
 // character). Returns `true` if the key was one of them, so the game does not
-// see it. `pressed` is `false` for releases and key repeats.
-bool controller_handle_key(int scancode, bool pressed);
+// see it. Call it for every key event, also while the world loop does not run,
+// so releases reach the command buffer.
+bool controller_handle_key(int scancode, bool down, bool repeat);
 
 // While a list screen runs (the load and save slots), the d-pad and left stick
 // move the selection with the arrow keys and A confirms it, because the list is

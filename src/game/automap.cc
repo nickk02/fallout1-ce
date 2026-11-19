@@ -25,6 +25,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -267,6 +268,7 @@ void automap(bool isInGame, bool isUsingScanner)
 
     draw_top_down_map(window, elevation, frmData[AUTOMAP_FRM_BACKGROUND], autoflags);
 
+    ModalPause modalPause;
     bool isoWasEnabled = map_disable_bk_processes();
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);
 
@@ -362,6 +364,7 @@ void automap(bool isInGame, bool isUsingScanner)
     if (isoWasEnabled) {
         map_enable_bk_processes();
     }
+    modalPause.release();
 
     win_delete(window);
     text_font(oldFont);

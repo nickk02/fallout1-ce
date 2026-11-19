@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "game/automap.h"
 #include "game/bmpdlog.h"
@@ -39,9 +40,9 @@
 #include "game/wordwrap.h"
 #include "game/worldmap.h"
 #include "platform_compat.h"
-#include "plib/gnw/controller.h"
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
+#include "plib/gnw/controller.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
@@ -49,6 +50,7 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -176,6 +178,9 @@ static bool quick_done = false;
 
 // 0x505964
 static bool bk_enable = false;
+
+// Holds the world pause while the load/save screen is open.
+static std::optional<ModalPause> lsgame_pause;
 
 // 0x505968
 static int map_backup_count = -1;
@@ -1282,6 +1287,7 @@ static int LSGameStart(int windowType)
     thumbnail_image[1] = snapshot + LS_PREVIEW_SIZE;
 
     if (windowType != LOAD_SAVE_WINDOW_TYPE_LOAD_GAME_FROM_MAIN_MENU) {
+        lsgame_pause.emplace();
         bk_enable = map_disable_bk_processes();
     }
 
@@ -1337,6 +1343,7 @@ static int LSGameStart(int windowType)
                 if (bk_enable) {
                     map_enable_bk_processes();
                 }
+                lsgame_pause.reset();
             }
 
             cycle_enable();
@@ -1363,6 +1370,7 @@ static int LSGameStart(int windowType)
             if (bk_enable) {
                 map_enable_bk_processes();
             }
+            lsgame_pause.reset();
         }
 
         cycle_enable();
@@ -1502,6 +1510,7 @@ static int LSGameEnd(int windowType)
         if (bk_enable) {
             map_enable_bk_processes();
         }
+        lsgame_pause.reset();
     }
 
     cycle_enable();
@@ -2301,7 +2310,7 @@ static int DummyFunc(DB_FILE* stream)
 // 0x471448
 static int PrepLoad(DB_FILE* stream)
 {
-    game_reset();
+    if (game_reset() != 0) return -1;
     map_data.name[0] = '\0';
     set_game_time(LSData[slot_cursor].gameTime);
     return 0;
@@ -2475,7 +2484,7 @@ static int SlotMap2Game(DB_FILE* stream)
         return -1;
     }
 
-    if (map_load_in_game(LSData[slot_cursor].fileName) == -1) {
+    if (map_load_in_game(LSData[slot_cursor].fileName) != 0) {
         debug_printf("LOADSAVE: returning 13\n");
         return -1;
     }

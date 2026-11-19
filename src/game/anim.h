@@ -1,9 +1,14 @@
 #ifndef FALLOUT_GAME_ANIMATION_H_
 #define FALLOUT_GAME_ANIMATION_H_
 
+#include <memory>
+#include <stdint.h>
+
 #include "game/object_types.h"
 
 namespace fallout {
+
+class AnimationPayload;
 
 typedef enum AnimationRequestOptions {
     ANIMATION_REQUEST_UNRESERVED = 0x01,
@@ -96,6 +101,9 @@ typedef enum AnimationType {
 // Signature of animation callback accepting 2 parameters.
 typedef int AnimationCallback(void*, void*);
 
+// Consumes payload even when registration fails.
+int register_owned_callback(std::unique_ptr<AnimationPayload> payload, int delay, bool forced = false);
+
 // Signature of animation callback accepting 3 parameters.
 typedef int AnimationCallback3(void*, void*, void*);
 
@@ -117,6 +125,15 @@ int register_clear(Object* a1);
 int register_end();
 int check_registry(Object* obj);
 int anim_busy(Object* a1);
+// Includes accumulating work and excludes opaque callback parameters.
+bool anim_actor_has_work(const Object* actor);
+// Serials that name registered sequences. The mark is the newest one issued.
+uint64_t anim_serial_mark();
+// The serial of the sequence whose automatic stand pose is running now, or zero.
+// A registration or clear made by a sequence's callback reads zero.
+uint64_t anim_auto_stand_serial();
+// Up to `capacity` serials newer than `mark` of live sequences that act on `actor`.
+int anim_actor_sequences_since(const Object* actor, uint64_t mark, uint64_t* out, int capacity);
 int register_object_move_to_object(Object* owner, Object* destination, int actionPoints, int delay);
 int register_object_run_to_object(Object* owner, Object* destination, int actionPoints, int delay);
 int register_object_move_to_tile(Object* owner, int tile, int elevation, int actionPoints, int delay);

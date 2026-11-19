@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <optional>
+
 #include "game/art.h"
 #include "game/cycle.h"
 #include "game/game.h"
@@ -24,6 +26,7 @@
 #include "plib/gnw/rect.h"
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
+#include "sim/modal_pause.h"
 
 namespace fallout {
 
@@ -112,6 +115,9 @@ static unsigned char* winbuf;
 
 // 0x66519C
 static int fontsave;
+
+// Holds the world pause while the skilldex is open.
+static std::optional<ModalPause> skldx_pause;
 
 // 0x499560
 int skilldex_select()
@@ -248,6 +254,7 @@ static int skilldex_start()
         return -1;
     }
 
+    skldx_pause.emplace();
     bk_enable = map_disable_bk_processes();
 
     cycle_disable();
@@ -399,6 +406,7 @@ static void skilldex_end()
     if (bk_enable) {
         map_enable_bk_processes();
     }
+    skldx_pause.reset();
 
     cycle_enable();
 

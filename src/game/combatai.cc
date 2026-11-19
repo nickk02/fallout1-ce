@@ -31,6 +31,8 @@
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
 #include "plib/gnw/memory.h"
+#include "sim/animation_callbacks.h"
+#include "sim/world_sim.h"
 
 namespace fallout {
 
@@ -62,7 +64,7 @@ static int ai_switch_weapons(Object* critter, int* hit_mode, Object** weapon);
 static int ai_called_shot(Object* critter, Object* target, int hit_mode);
 static int ai_attack(Object* critter, Object* target, int hit_mode);
 static int ai_try_attack(Object* critter, Object* target);
-static int ai_print_msg(Object* critter, int type);
+static int ai_print_msg(void* actor, const char* text, int type);
 static int combatai_rating(Object* obj);
 static int combatai_load_messages();
 static int combatai_unload_messages();
@@ -100,17 +102,11 @@ static MessageList ai_message_file;
 // 0x56BEB8
 static AiPacket* cap;
 
-// 0x56BE10
-static char target_str[80];
-
 // 0x56BEBC
 static int curr_crit_num;
 
 // 0x56BEC0
 static Object** curr_crit_list;
-
-// 0x56BE60
-static char attack_str[80];
 
 // 0x424450
 static void parse_hurt_str(char* str, int* value)
@@ -1381,7 +1377,6 @@ int combatai_msg(Object* critter, Attack* attack, int type, int delay)
     AiPacket* ai;
     int start;
     int end;
-    char* string;
     MessageListItem messageListItem;
 
     if (PID_TYPE(critter->pid) != OBJ_TYPE_CRITTER) {
@@ -1413,27 +1408,22 @@ int combatai_msg(Object* critter, Attack* attack, int type, int delay)
     case AI_MESSAGE_TYPE_RUN:
         start = ai->run_start;
         end = ai->move_start;
-        string = attack_str;
         break;
     case AI_MESSAGE_TYPE_MOVE:
         start = ai->move_start;
         end = ai->attack_start;
-        string = attack_str;
         break;
     case AI_MESSAGE_TYPE_ATTACK:
         start = ai->attack_start;
         end = ai->miss_start;
-        string = attack_str;
         break;
     case AI_MESSAGE_TYPE_MISS:
         start = ai->miss_start;
         end = ai->hit_start[0];
-        string = target_str;
         break;
     case AI_MESSAGE_TYPE_HIT:
         start = ai->hit_start[attack->defenderHitLocation];
         end = ai->hit_start[attack->defenderHitLocation + 1];
-        string = target_str;
         break;
     default:
         return -1;
@@ -1449,16 +1439,14 @@ int combatai_msg(Object* critter, Attack* attack, int type, int delay)
     }
 
     debug_printf("%s said message %d\n", object_name(critter), messageListItem.num);
-    strcpy(string, messageListItem.text);
-
-    // TODO: Get rid of casts.
-    return register_object_call(critter, (void*)type, (AnimationCallback*)ai_print_msg, delay);
+    auto payload = std::make_unique<AnimationTaunt>(object_registry(), object_ref_make(object_registry(), critter, world_sim_epoch()), messageListItem.text, type, world_sim_epoch, ai_print_msg);
+    return register_owned_callback(std::move(payload), delay);
 }
 
 // 0x4260B0
-static int ai_print_msg(Object* critter, int type)
+static int ai_print_msg(void* actor, const char* text, int /* type */)
 {
-    char* string;
+    Object* critter = static_cast<Object*>(actor);
     AiPacket* ai;
     Rect rect;
 
@@ -1466,19 +1454,9 @@ static int ai_print_msg(Object* critter, int type)
         return 0;
     }
 
-    switch (type) {
-    case AI_MESSAGE_TYPE_HIT:
-    case AI_MESSAGE_TYPE_MISS:
-        string = target_str;
-        break;
-    default:
-        string = attack_str;
-        break;
-    }
-
     ai = ai_cap(critter);
 
-    if (text_object_create(critter, string, ai->font, ai->color, ai->outline_color, &rect) == 0) {
+    if (text_object_create(critter, const_cast<char*>(text), ai->font, ai->color, ai->outline_color, &rect) == 0) {
         tile_refresh_rect(&rect, critter->elevation);
     }
 

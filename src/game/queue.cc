@@ -321,28 +321,46 @@ bool queue_find(Object* owner, int eventType)
     return false;
 }
 
+// Runs the earliest event if it is due at `time`. Returns true when an event
+// ran, and stores the handler's result in `handlerResult` (may be NULL).
+//
+// The event is taken out of the list before its handler runs, so a handler may
+// add, remove or clear events. Its data is freed after the handler and then the
+// node. `time` is the caller's cutoff and is not read again: a handler that
+// moves the game time does not change which events are due in this call.
+bool queue_process_one(int time, int* handlerResult)
+{
+    QueueListNode* queueListNode = queue;
+    if (queueListNode == NULL || time < queueListNode->time) {
+        return false;
+    }
+
+    queue = queueListNode->next;
+
+    EventTypeDescription* eventTypeDescription = &(q_func[queueListNode->type]);
+    int result = eventTypeDescription->handlerProc(queueListNode->owner, queueListNode->data);
+
+    if (eventTypeDescription->freeProc != NULL) {
+        eventTypeDescription->freeProc(queueListNode->data);
+    }
+
+    mem_free(queueListNode);
+
+    if (handlerResult != NULL) {
+        *handlerResult = result;
+    }
+
+    return true;
+}
+
 // 0x4909E4
 int queue_process()
 {
     int time = game_time();
     int v1 = 0;
 
-    while (queue != NULL) {
-        QueueListNode* queueListNode = queue;
-        if (time < queueListNode->time || v1 != 0) {
-            break;
-        }
-
-        queue = queueListNode->next;
-
-        EventTypeDescription* eventTypeDescription = &(q_func[queueListNode->type]);
-        v1 = eventTypeDescription->handlerProc(queueListNode->owner, queueListNode->data);
-
-        if (eventTypeDescription->freeProc != NULL) {
-            eventTypeDescription->freeProc(queueListNode->data);
-        }
-
-        mem_free(queueListNode);
+    // Stops after the first handler that returns nonzero.
+    while (v1 == 0 && queue_process_one(time, &v1)) {
     }
 
     return v1;
@@ -397,6 +415,19 @@ void queue_clear_type(int eventType, QueueEventHandler* fn)
             curr = *ptr;
         }
     }
+}
+
+// Stores the time of the earliest event in `time` and returns true. Returns false,
+// and leaves `time` alone, when the queue is empty. queue_next_time() returns 0
+// for an empty queue, which is also a valid event time.
+bool queue_peek_time(int* time)
+{
+    if (queue == NULL) {
+        return false;
+    }
+
+    *time = queue->time;
+    return true;
 }
 
 // TODO: Make unsigned.
